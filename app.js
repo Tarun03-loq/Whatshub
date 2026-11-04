@@ -22,6 +22,7 @@ const state = {
   selectedDate: new Date().getDate(),
   daemonTimer: null,
   qrPollTimer: null,
+  qrRefreshPending: false,
   wlSearchQuery: "",
 };
 
@@ -147,7 +148,7 @@ function priorityColor(p) {
 
 function escHtml(str) {
   if (!str) return "";
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* ── TIME PARSING & ORDERING UTILITY ── */
@@ -283,6 +284,8 @@ async function checkDaemonStatus() {
 
 /* ── QR CODE GENERATION & POLLING ── */
 async function requestFreshQR() {
+  if (state.qrRefreshPending) return;
+  state.qrRefreshPending = true;
   const badge = document.getElementById("qr-source-badge");
   const display = document.getElementById("qrcode-display");
   if (badge) badge.textContent = "🔄 Handshaking with WhatsApp Web...";
@@ -293,8 +296,10 @@ async function requestFreshQR() {
     </div>`;
   }
   try {
-    await fetch(DAEMON + "/refresh_qr", { method: "POST" });
+    const response = await fetch(DAEMON + "/refresh_qr", { method: "POST" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
   } catch (_) {}
+  setTimeout(() => { state.qrRefreshPending = false; }, 5000);
   setTimeout(pollQR, 1000);
 }
 
@@ -369,14 +374,18 @@ async function pollQR() {
       if (badge) badge.textContent = "🟡 Connecting to WhatsApp Web...";
     }
   } catch (_) {
+    const hostedPreview = location.protocol === "https:" && !["localhost", "127.0.0.1"].includes(location.hostname);
+    const startHint = hostedPreview
+      ? "Run start_whatshub.bat on this computer to use live WhatsApp data."
+      : "python backend/listener.py";
     if (display) {
       display.innerHTML = `<div style="color:#f87171;font-size:12px;padding:30px;text-align:center;">
         <div style="font-size:24px;margin-bottom:8px;">⚠️</div>
-        Daemon Offline<br><br><code style="background:rgba(255,255,255,0.06);padding:4px 8px;border-radius:4px;font-size:11px;">python backend/listener.py</code>
+        Daemon Offline<br><br><code style="background:rgba(255,255,255,0.06);padding:4px 8px;border-radius:4px;font-size:11px;">${escHtml(startHint)}</code>
       </div>`;
     }
     if (caption) {
-      caption.textContent = "Start backend/listener.py in terminal";
+      caption.textContent = startHint;
       caption.style.color = "#f87171";
     }
     if (badge) badge.textContent = "⛔ Daemon not running on :5001";
@@ -496,7 +505,7 @@ function renderWhitelist() {
   list.innerHTML = filtered.map(g => `
     <div class="wl-group-item ${g.is_active ? 'active' : ''}">
       <div class="wl-group-info">
-        <div class="wl-group-avatar">${g.icon || '👥'}</div>
+        <div class="wl-group-avatar">${escHtml(g.icon || '👥')}</div>
         <div class="wl-group-text">
           <div class="wl-group-name">
             ${escHtml(g.name)}
@@ -509,8 +518,8 @@ function renderWhitelist() {
         <span style="font-size:10px;font-weight:700;color:${g.is_active ? 'var(--wa-green)' : 'var(--text-subtle)'};">
           ${g.is_active ? 'TRACKED' : 'IGNORED'}
         </span>
-        <button class="wl-toggle-switch ${g.is_active ? 'on' : ''}" data-jid="${g.jid}" title="Toggle Ollama AI Tracking"></button>
-        <button class="btn btn-danger" style="padding:3px 7px;font-size:10px;border-radius:4px;" data-remove-jid="${g.jid}" title="Remove Group">✕</button>
+        <button class="wl-toggle-switch ${g.is_active ? 'on' : ''}" data-jid="${escHtml(g.jid)}" title="Toggle Ollama AI Tracking"></button>
+        <button class="btn btn-danger" style="padding:3px 7px;font-size:10px;border-radius:4px;" data-remove-jid="${escHtml(g.jid)}" title="Remove Group">✕</button>
       </div>
     </div>
   `).join("");
@@ -521,6 +530,7 @@ function renderWhitelist() {
       const jid = btn.dataset.jid;
       const grp = state.whitelist.find(g => g.jid === jid);
       if (!grp) return;
+      const previous = grp.is_active;
       grp.is_active = !grp.is_active;
 
       // Update UI switch immediately
@@ -529,12 +539,21 @@ function renderWhitelist() {
 
       // Post to backend
       try {
-        await fetch(DAEMON + "/groups/toggle", {
+        const response = await fetch(DAEMON + "/groups/toggle", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jid, is_active: grp.is_active })
         });
-      } catch (_) {}
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || "Update rejected");
+      } catch (err) {
+        grp.is_active = previous;
+        renderWhitelist();
+        renderGroupsPanel();
+        toast("Could not update group. Is the local daemon running?", "⚠️");
+        return;
+      }
 
       // Re-summarize active groups with Ollama
       await fetchSummaries();
@@ -547,16 +566,26 @@ function renderWhitelist() {
   list.querySelectorAll("[data-remove-jid]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const jid = btn.dataset.removeJid;
+      const previousGroups = [...state.whitelist];
       state.whitelist = state.whitelist.filter(g => g.jid !== jid);
       renderWhitelist();
       renderGroupsPanel();
       try {
-        await fetch(DAEMON + "/groups/remove", {
+        const response = await fetch(DAEMON + "/groups/remove", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jid })
         });
-      } catch (_) {}
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (!result.success) throw new Error(result.error || "Removal rejected");
+      } catch (_) {
+        state.whitelist = previousGroups;
+        renderWhitelist();
+        renderGroupsPanel();
+        toast("Could not remove group. Is the local daemon running?", "⚠️");
+        return;
+      }
       toast("Group removed from whitelist", "🗑️");
     });
   });
@@ -590,12 +619,21 @@ document.getElementById("btn-add-wl")?.addEventListener("click", async () => {
   renderGroupsPanel();
 
   try {
-    await fetch(DAEMON + "/groups/add", {
+    const response = await fetch(DAEMON + "/groups/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jid, name: groupName, icon: "💬" })
     });
-  } catch (_) {}
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (!result.success) throw new Error(result.error || "Add rejected");
+  } catch (_) {
+    state.whitelist = state.whitelist.filter(g => g.jid !== jid);
+    renderWhitelist();
+    renderGroupsPanel();
+    toast("Could not save group. Is the local daemon running?", "⚠️");
+    return;
+  }
   toast("Group added to whitelist", "✅");
 });
 
@@ -787,8 +825,8 @@ function renderGroupsPanel() {
     const gTasks = state.tasks.filter(t => t.group_jid === g.jid);
     const preview = gTasks.length ? gTasks[0].title : (state.wa.connected ? "Active & Monitoring" : "Standby");
     const badge = gTasks.length;
-    return `<div class="chat-item" data-jid="${g.jid}">
-      <div class="chat-avatar">${g.icon || '👥'}</div>
+    return `<div class="chat-item" data-jid="${escHtml(g.jid)}">
+      <div class="chat-avatar">${escHtml(g.icon || '👥')}</div>
       <div class="chat-info">
         <div class="chat-name">${escHtml(g.name)}</div>
         <div class="chat-preview">${escHtml(preview)}</div>
@@ -827,11 +865,12 @@ function renderPriorityView() {
 
 /* ── TASK CARD HTML ── */
 function taskCard(t) {
-  const pLabel = t.priority === "high" ? "🔴 High" : t.priority === "medium" ? "🟡 Medium" : "🟢 Low";
+  const priority = ["high", "medium", "low"].includes(t.priority) ? t.priority : "low";
+  const pLabel = priority === "high" ? "🔴 High" : priority === "medium" ? "🟡 Medium" : "🟢 Low";
   return `<div class="task-card">
     <div class="task-card-top">
       <div class="task-title">${escHtml(t.title)}</div>
-      <span class="task-priority-badge ${t.priority}">${pLabel}</span>
+      <span class="task-priority-badge ${priority}">${pLabel}</span>
     </div>
     <div class="task-summary">${escHtml((t.summary || "").substring(0, 100))}...</div>
     <div class="task-meta">
@@ -848,10 +887,11 @@ function openTaskModal(t) {
   document.getElementById("task-modal-group").textContent = (t.group_name || "") + " · " + (t.sender || "AI Extracted");
   document.getElementById("task-modal-raw").textContent = t.raw_message || "—";
   document.getElementById("task-modal-summary").textContent = t.summary || "—";
-  const pLabel = t.priority === "high" ? "🔴 High" : t.priority === "medium" ? "🟡 Medium" : "🟢 Low";
+  const priority = ["high", "medium", "low"].includes(t.priority) ? t.priority : "low";
+  const pLabel = priority === "high" ? "🔴 High" : priority === "medium" ? "🟡 Medium" : "🟢 Low";
   const elP = document.getElementById("task-modal-priority");
   elP.textContent = pLabel;
-  elP.style.color = priorityColor(t.priority);
+  elP.style.color = priorityColor(priority);
   document.getElementById("task-modal-deadline").textContent = t.deadline_display || "—";
   document.getElementById("task-modal-type").textContent = (t.item_type || "").replace(/^\w/, c => c.toUpperCase());
   openModal("modal-task");
@@ -878,14 +918,6 @@ function isTaskOnDate(task, y, m, d) {
   const disp = (task.deadline_display || "").toLowerCase();
   if (isSelectedToday && disp.includes("today")) return true;
   if (isSelectedTomorrow && disp.includes("tomorrow")) return true;
-
-  // Check creation date if today
-  if (isSelectedToday && task.created_at) {
-    const cr = new Date(task.created_at);
-    if (!isNaN(cr.getTime()) && cr.getDate() === d && cr.getMonth() === m) {
-      return true;
-    }
-  }
 
   return false;
 }
@@ -975,10 +1007,10 @@ function selectCalDate(day) {
   panel.innerHTML = eventsWithTime.map(({ task: t, timeStr }) => {
     const pLabel = t.priority === "high" ? "🔴 High Priority" : t.priority === "medium" ? "🟡 Medium Priority" : "🟢 Low Priority";
     return `
-      <div class="cal-event-card ${t.priority}" data-id="${t.id}">
+      <div class="cal-event-card ${["high", "medium", "low"].includes(t.priority) ? t.priority : "low"}" data-id="${escHtml(t.id)}">
         <div class="cal-event-header">
           <span class="cal-event-time">⏰ ${escHtml(timeStr)}</span>
-          <span class="task-priority-badge ${t.priority}">${pLabel}</span>
+          <span class="task-priority-badge ${["high", "medium", "low"].includes(t.priority) ? t.priority : "low"}">${pLabel}</span>
         </div>
         <div class="cal-event-title">${escHtml(t.title)}</div>
         <div class="cal-event-desc">${escHtml(t.summary || t.action_item || t.raw_message)}</div>
@@ -1002,11 +1034,13 @@ function selectCalDate(day) {
 document.getElementById("cal-prev")?.addEventListener("click", () => {
   state.calMonth--;
   if (state.calMonth < 0) { state.calMonth = 11; state.calYear--; }
+  state.selectedDate = Math.min(state.selectedDate, new Date(state.calYear, state.calMonth + 1, 0).getDate());
   renderCalendar();
 });
 document.getElementById("cal-next")?.addEventListener("click", () => {
   state.calMonth++;
   if (state.calMonth > 11) { state.calMonth = 0; state.calYear++; }
+  state.selectedDate = Math.min(state.selectedDate, new Date(state.calYear, state.calMonth + 1, 0).getDate());
   renderCalendar();
 });
 
@@ -1047,12 +1081,20 @@ document.getElementById("btn-run-sim")?.addEventListener("click", async () => {
   };
 
   try {
-    await fetch(DAEMON + "/receive", {
+    const response = await fetch(DAEMON + "/receive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
-  } catch (_) {}
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    if (!result.task_id) throw new Error(result.reason || "Message was not accepted");
+  } catch (_) {
+    toast("Message was not processed. Start the local daemon and enable this group first.", "⚠️", 4500);
+    btn.textContent = "🚀 Process with AI";
+    btn.disabled = false;
+    return;
+  }
 
   await fetchTasks();
   await fetchSummaries();

@@ -7,14 +7,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
-from typing import Optional, List, Dict
-import os
-import uuid
+from typing import Optional, Literal
 import urllib.request
 import json
+import threading
+from datetime import datetime, timezone
 
 from database import get_db, init_db
-from listener import process_inbound_message, get_neonize_qr_code, set_neonize_qr_code
+from listener import (
+    HAS_NEONIZE,
+    process_inbound_message,
+    run_http_server,
+    trigger_fresh_qr,
+    whatsapp_state,
+)
 
 app = FastAPI(
     title="UNIFIES Cross-Chat Task Aggregator API",
@@ -24,8 +30,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -33,6 +39,11 @@ app.add_middleware(
 @app.on_event("startup")
 def startup_event():
     init_db()
+    if not hasattr(app.state, "daemon_thread") or not app.state.daemon_thread.is_alive():
+        app.state.daemon_thread = threading.Thread(target=run_http_server, daemon=True)
+        app.state.daemon_thread.start()
+    if HAS_NEONIZE:
+        trigger_fresh_qr()
 
 # --- Request Models ---
 class SimulateMessageRequest(BaseModel):
@@ -48,7 +59,7 @@ class WhitelistGroupRequest(BaseModel):
     icon: Optional[str] = "💬"
 
 class TaskStatusUpdate(BaseModel):
-    status: str
+    status: Literal["pending", "done"]
 
 # --- API Endpoints ---
 @app.get("/api/health")
@@ -184,8 +195,11 @@ def update_task_status(task_id: str, req: TaskStatusUpdate):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (req.status, task_id))
+    changed = cursor.rowcount
     conn.commit()
     conn.close()
+    if not changed:
+        raise HTTPException(status_code=404, detail="Task not found")
     return {"success": True, "task_id": task_id, "new_status": req.status}
 
 @app.get("/api/groups")
@@ -224,19 +238,39 @@ def export_task_as_ics(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    d = task["deadline"].replace("-", "").replace(":", "").split(".")[0]
+    if not task["deadline"]:
+        raise HTTPException(status_code=422, detail="Task has no deadline to export")
+    try:
+        deadline = datetime.fromisoformat(task["deadline"].replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Task deadline is not a valid ISO datetime")
+
+    def ics_escape(value):
+        return (
+            str(value or "")
+            .replace("\\", "\\\\")
+            .replace("\r\n", "\\n")
+            .replace("\n", "\\n")
+            .replace("\r", "\\n")
+            .replace(",", "\\,")
+            .replace(";", "\\;")
+        )
+
+    dtstamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dtstart = deadline.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ics_body = f"""BEGIN:VCALENDAR
 VERSION:2.0
 PRODID:-//Hacknova//UNIFIES Aggregator//EN
 BEGIN:VEVENT
 UID:{task['id']}@hacknova.app
-DTSTAMP:{d}Z
-DTSTART:{d}
-SUMMARY:[UNIFIES] {task['title']}
-DESCRIPTION:{task['summary']} (From: {task['group_name']})\\nPriority: {task['priority'].upper()}\\nType: {task['item_type'].upper()}
+DTSTAMP:{dtstamp}
+DTSTART:{dtstart}
+SUMMARY:[UNIFIES] {ics_escape(task['title'])}
+DESCRIPTION:{ics_escape(task['summary'])} (From: {ics_escape(task['group_name'])})\\nPriority: {ics_escape(task['priority']).upper()}\\nType: {ics_escape(task['item_type']).upper()}
 STATUS:CONFIRMED
 END:VEVENT
 END:VCALENDAR"""
+    ics_body = ics_body.replace("\r\n", "\n").replace("\n", "\r\n")
 
     return Response(
         content=ics_body,
@@ -248,41 +282,36 @@ END:VCALENDAR"""
 @app.get("/api/whatsapp/status")
 def get_whatsapp_status():
     return {
-        "is_linked": True,
-        "phone": "+91 98402 18921",
-        "device": "Google Pixel 8 Pro",
-        "protocol": "Neonize v0.3",
-        "session_id": "HACK-9842",
-        "monitored_groups": 4
+        "is_linked": bool(whatsapp_state.get("connected")),
+        "phone": whatsapp_state.get("phone"),
+        "protocol": "Neonize" if HAS_NEONIZE else "Unavailable",
+        "monitored_groups": sum(1 for g in get_whitelisted_groups() if g["is_active"]),
     }
 
 @app.get("/api/whatsapp/qr")
 def get_whatsapp_qr():
     """
-    Returns the real-time QR code sent from Neonize, encoded as base64 string
+    Returns the current pairing QR emitted by Neonize, if one is available.
     """
-    qr_state = get_neonize_qr_code()
+    qr_state = whatsapp_state
     return {
-        "status": "ready",
-        "source": "Neonize Listener (whatsmeow multi-device handshake)",
-        "qr_base64": qr_state["base64"],
-        "qr_raw": qr_state["raw"],
-        "timestamp": qr_state["timestamp"],
-        "expires_in_seconds": 60
+        "status": "connected" if qr_state.get("connected") else ("ready" if qr_state.get("qr") else "waiting"),
+        "source": "Neonize" if HAS_NEONIZE else "unavailable",
+        "qr": qr_state.get("qr"),
+        "qr_svg": qr_state.get("qr_svg"),
+        "timestamp": qr_state.get("qr_ts"),
+        "expires_in_seconds": qr_state.get("expires_in", 0),
     }
 
 @app.post("/api/whatsapp/qr/refresh")
 def refresh_whatsapp_qr():
     """
-    Requests a fresh QR token handshake from Neonize and encodes to Base64
+    Starts a pairing handshake without deleting the saved WhatsApp session.
     """
-    import datetime
-    token = f"2@{uuid.uuid4().hex[:12]},vXm9zL+key={datetime.datetime.now().strftime('%Y%m%d%H%M%S')},hacknova-session"
-    b64 = set_neonize_qr_code(token)
+    started = trigger_fresh_qr()
     return {
-        "status": "refreshed",
-        "qr_base64": b64,
-        "qr_raw": token
+        "status": "started" if started else "not_started",
+        "message": "Pairing handshake started" if started else "Pairing is unavailable, already running, or already connected",
     }
 
 @app.post("/api/whatsapp/webhook")
@@ -306,4 +335,4 @@ def whatsapp_webhook(payload: dict):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)

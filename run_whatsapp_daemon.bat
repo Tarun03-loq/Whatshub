@@ -29,13 +29,21 @@ echo [1/2] Verifying Python runtime:
 %PYTHON_CMD% --version
 echo.
 
-echo [2/2] Checking dependencies (neonize, segno, requests)...
-%PYTHON_CMD% -m pip install neonize segno requests fastapi uvicorn pydantic python-dateutil --quiet
+echo [2/2] Installing project dependencies...
+%PYTHON_CMD% -m pip install -r backend\requirements.txt
+if errorlevel 1 (
+    echo [ERROR] Dependency installation failed.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================================
-echo   Launching Neonize WhatsApp Listener on http://localhost:5001
+echo   Launching WhatsHub dashboard and WhatsApp daemon
 echo ============================================================
 echo.
+start "WhatsHub Dashboard Server" /min %PYTHON_CMD% -m http.server 8080 --bind 127.0.0.1 --directory "%~dp0"
+timeout /t 2 /nobreak >nul
+start "" "http://127.0.0.1:8080"
 if exist listener.py (%PYTHON_CMD% listener.py) else (%PYTHON_CMD% backend\listener.py)
 pause

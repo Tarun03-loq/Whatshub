@@ -89,7 +89,11 @@ def run_ocr_on_file(file_path: str) -> str:
                     text += (page.extract_text() or "") + "\n"
             return text.strip()
         except ImportError:
-            return f"[PDF document parsed: {os.path.basename(file_path)}]"
+            print("[OCR] Install pdfplumber to read PDF attachments.")
+            return ""
+        except Exception as err:
+            print(f"[OCR] Could not extract PDF text: {err}")
+            return ""
 
     # Image Handler (JPG, PNG, JPEG)
     if ext in [".png", ".jpg", ".jpeg", ".webp"]:
@@ -98,7 +102,11 @@ def run_ocr_on_file(file_path: str) -> str:
             from PIL import Image
             return pytesseract.image_to_string(Image.open(file_path)).strip()
         except ImportError:
-            return f"[Image OCR scanned: {os.path.basename(file_path)}]"
+            print("[OCR] Install pytesseract and Pillow to read image attachments.")
+            return ""
+        except Exception as err:
+            print(f"[OCR] Could not read image attachment (check Tesseract installation): {err}")
+            return ""
 
     return ""
 

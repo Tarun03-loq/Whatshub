@@ -10,11 +10,12 @@ import json
 import uuid
 import base64
 import threading
-import requests
 import queue
 import sqlite3
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import mimetypes
+import tempfile
 
 # Reconfigure stdout/stderr to use utf-8 to prevent encoding crashes on Windows terminal
 if hasattr(sys.stdout, "reconfigure"):
@@ -26,6 +27,11 @@ from database import get_db, init_db
 from extractor import extract_task_from_message
 
 OLLAMA_MODEL = "gemma:2b"
+ALLOWED_FRONTEND_ORIGINS = {
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+}
+ATTACHMENTS_DIR = os.path.join(os.path.dirname(__file__), "attachments")
 
 # Global State
 whatsapp_state = {
@@ -70,16 +76,12 @@ def is_jid_whitelisted(group_jid: str) -> bool:
         conn.close()
         if row is not None:
             return bool(row["is_active"])
-        # If group is not in whitelist table, check if any groups exist
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM whitelisted_groups WHERE is_active = 1")
-        active_count = cursor.fetchone()[0]
-        conn.close()
-        # If user has configured active whitelisted groups, drop unlisted ones
-        return active_count == 0
+        # Unknown groups are never implicitly trusted, including when the
+        # whitelist is empty.
+        return False
     except Exception:
-        return True
+        # Fail closed if the database cannot be checked.
+        return False
 
 def get_whitelisted_groups_list():
     """
@@ -131,13 +133,13 @@ def get_whitelisted_groups_list():
                             "jid": full_jid,
                             "name": g_name,
                             "icon": "👥",
-                            "is_active": True,
+                            "is_active": False,
                             "is_whatsapp": True
                         }
                         # Auto-persist newly discovered WhatsApp group to SQLite
                         try:
                             c.execute(
-                                "INSERT OR IGNORE INTO whitelisted_groups (jid, name, icon, is_active, added_at) VALUES (?, ?, ?, 1, datetime('now'))",
+                                "INSERT OR IGNORE INTO whitelisted_groups (jid, name, icon, is_active, added_at) VALUES (?, ?, ?, 0, datetime('now'))",
                                 (full_jid, g_name, "👥")
                             )
                         except Exception:
@@ -154,12 +156,13 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
     Core Pipeline Handler:
     WhatsApp -> Whitelist Filter -> Gemma 2B (Ollama Local) + OCR -> SQLite
     """
+    text = str(text or "").strip()
+    group_jid = str(group_jid or "")
     print(f"\n[Neonize Pipeline] Inbound message from: {group_jid} ({group_name})")
     
     # Whitelist Check
     if not is_jid_whitelisted(group_jid):
         print(f"[Neonize - Privacy Shield] 🛡️ DROPPED: {group_jid} is not selected in whitelist. Message ignored.")
-        log_message(group_jid, sender, text, was_whitelisted=False)
         return None
 
     print(f"[Neonize] Whitelist check passed! Dispatching to Local Gemma 2B (Ollama)... ({text[:50]}...)")
@@ -167,6 +170,17 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
 
     # Extract Task via Local Gemma 2B + OCR
     extracted = extract_task_from_message(text, attachment_path)
+    priority = extracted.get("priority")
+    if priority not in {"high", "medium", "low"}:
+        priority = "medium"
+    item_type = extracted.get("item_type")
+    if item_type not in {"assignment", "duedate", "submission", "meeting", "cultural"}:
+        item_type = "assignment"
+    category = extracted.get("category")
+    if category not in {"college", "work", "delivery", "money", "family"}:
+        category = "college"
+    title = str(extracted.get("title") or text[:50] or "New task")[:200]
+    summary = str(extracted.get("summary") or text[:200])[:2000]
 
     # Store in SQLite
     task_id = f"task-{uuid.uuid4().hex[:8]}"
@@ -181,19 +195,19 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             task_id,
-            extracted.get("category", "college"),
-            extracted.get("priority", "medium"),
-            extracted.get("item_type", "assignment"),
-            extracted.get("title", text[:50]),
+            category,
+            priority,
+            item_type,
+            title,
             extracted.get("action_item", "Action item"),
-            extracted.get("summary", text[:100]),
+            summary,
             text,
             group_name,
             group_jid,
             sender,
             extracted.get("deadline"),
             extracted.get("deadline_display", "TBD"),
-            1 if extracted.get("priority") == "high" else 0,
+            1 if priority == "high" else 0,
             1 if extracted.get("is_one_day_reminder") else 0,
             extracted.get("confidence", "98.9%"),
             "pending",
@@ -206,6 +220,7 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
         print(f"[Neonize] ✅ Task stored in SQLite [{task_id}]: {extracted.get('title')} ({extracted.get('priority', '').upper()})")
     except Exception as db_err:
         print(f"[Neonize] Database error: {db_err}")
+        return None
 
     return task_id
 
@@ -234,13 +249,14 @@ def outbound_worker():
             max_attempts = 5
             while attempt <= max_attempts:
                 try:
-                    if client and hasattr(client, "send_message"):
-                        client.send_message(target_jid_obj, text_body)
+                    if not client or not whatsapp_state.get("connected"):
+                        raise RuntimeError("WhatsApp is not connected")
+                    client.send_message(target_jid_obj, text_body)
                     print(f"\n📤 [OUTGOING WA MESSAGE SENT] To: {raw_user}@s.whatsapp.net | Text: '{text_body[:60]}...'")
                     break
                 except Exception as send_err:
                     err_str = str(send_err)
-                    if "doesn't contain a device JID" in err_str or "not logged in" in err_str.lower():
+                    if "doesn't contain a device JID" in err_str or "not logged in" in err_str.lower() or "not connected" in err_str.lower():
                         whatsapp_state["connected"] = False
                         print(f"❌ [OUTGOING WA ERROR] WhatsApp account is not linked yet ({err_str}).")
                         break
@@ -256,6 +272,66 @@ def outbound_worker():
 threading.Thread(target=outbound_worker, daemon=True).start()
 
 # --- Neonize Event Listeners ---
+def download_supported_attachment(cl, msg_body):
+    """Download only supported image/PDF attachments to the ignored local cache."""
+    media_fields = ("imageMessage", "documentMessage")
+    media = None
+    for field in media_fields:
+        try:
+            if hasattr(msg_body, "HasField") and not msg_body.HasField(field):
+                continue
+        except (ValueError, TypeError):
+            continue
+        candidate = getattr(msg_body, field, None)
+        if candidate:
+            media = candidate
+            break
+    if media is None:
+        return None
+
+    mime = (getattr(media, "mimetype", "") or "").lower()
+    filename = os.path.basename(getattr(media, "fileName", "") or "")
+    ext = os.path.splitext(filename)[1].lower() or mimetypes.guess_extension(mime) or ""
+    if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}:
+        return None
+    if mime and not (mime == "application/pdf" or mime.startswith("image/")):
+        return None
+
+    declared_size = getattr(media, "fileLength", 0) or 0
+    if declared_size and int(declared_size) > 20 * 1024 * 1024:
+        print("[Media] Skipping attachment larger than 20 MiB.")
+        return None
+
+    os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+    fd, dest_path = tempfile.mkstemp(prefix="wa_", suffix=ext, dir=ATTACHMENTS_DIR)
+    os.close(fd)
+    try:
+        cl.download_any(msg_body, dest_path)
+        if not os.path.isfile(dest_path) or os.path.getsize(dest_path) == 0:
+            raise ValueError("download produced no file")
+        if os.path.getsize(dest_path) > 20 * 1024 * 1024:
+            raise ValueError("attachment exceeds 20 MiB")
+        return dest_path
+    except Exception:
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise
+
+
+def has_supported_media(msg_body):
+    for field in ("imageMessage", "documentMessage"):
+        try:
+            if msg_body.HasField(field):
+                return True
+        except (AttributeError, ValueError, TypeError):
+            candidate = getattr(msg_body, field, None)
+            if candidate and getattr(candidate, "mimetype", None):
+                return True
+    return False
+
+
 def setup_client_events(cl):
     if not cl:
         return
@@ -345,23 +421,31 @@ def setup_client_events(cl):
             if not msg_body:
                 return
 
-            text = None
-            if msg_body.conversation:
-                text = msg_body.conversation
-            elif msg_body.extendedTextMessage and msg_body.extendedTextMessage.text:
-                text = msg_body.extendedTextMessage.text
-
-            if not text:
-                return
-
             sender_jid_obj = message.Info.MessageSource.Sender if message.Info and message.Info.MessageSource and message.Info.MessageSource.Sender else None
             sender_jid = sender_jid_obj.User if sender_jid_obj else "Unknown"
             is_from_me = message.Info.MessageSource.IsFromMe if message.Info and message.Info.MessageSource else False
+            if is_from_me:
+                return
             chat_jid_obj = message.Info.MessageSource.Chat if message.Info and message.Info.MessageSource else None
             chat_user = chat_jid_obj.User if chat_jid_obj else sender_jid
             chat_server = chat_jid_obj.Server if chat_jid_obj and hasattr(chat_jid_obj, "Server") and chat_jid_obj.Server else ("g.us" if "g.us" in str(chat_jid_obj) else "s.whatsapp.net")
 
             full_jid = f"{chat_user}@{chat_server}"
+
+            text = getattr(msg_body, "conversation", "") or ""
+            extended = getattr(msg_body, "extendedTextMessage", None)
+            if not text and extended:
+                text = getattr(extended, "text", "") or ""
+            media = has_supported_media(msg_body)
+            if media and not text:
+                for field in ("imageMessage", "documentMessage"):
+                    media_part = getattr(msg_body, field, None)
+                    caption = getattr(media_part, "caption", "") if media_part else ""
+                    if caption:
+                        text = caption
+                        break
+            if not text and not media:
+                return
 
             chat_name = f"Group {chat_user[:8]}"
             try:
@@ -375,21 +459,23 @@ def setup_client_events(cl):
             except Exception:
                 pass
 
-            payload = {
-                "from": full_jid,
-                "sender": sender_jid,
-                "chatJid": full_jid,
-                "groupName": chat_name,
-                "message": text,
-                "text": text,
-                "isFromMe": is_from_me,
-                "timestamp": str(message.Info.Timestamp) if message.Info else str(int(time.time()))
-            }
+            if not is_jid_whitelisted(full_jid):
+                process_inbound_message(full_jid, chat_name, sender_jid, text or "Media attachment")
+                return
+
+            attachment_path = None
+            if media:
+                try:
+                    attachment_path = download_supported_attachment(cl, msg_body)
+                except Exception as media_err:
+                    print(f"[Media] Could not download attachment: {media_err}")
+            if not text:
+                text = f"Attachment: {os.path.basename(attachment_path)}" if attachment_path else "Unsupported media attachment"
 
             print(f"\n📩 [INCOMING WA MESSAGE] From: {full_jid} ({chat_name}) | Sender: {sender_jid} | Text: '{text}'")
 
             # Forward to pipeline
-            process_inbound_message(full_jid, chat_name, sender_jid, text)
+            process_inbound_message(full_jid, chat_name, sender_jid, text, attachment_path)
 
         except Exception as err:
             print(f"❌ [ERROR] Error handling incoming WhatsApp message: {err}")
@@ -426,20 +512,17 @@ def run_neonize_client():
 
 def trigger_fresh_qr():
     global client_thread, client
-    print("🔄 [RECONNECT TRIGGER] Starting fresh pairing handshake...")
-    if client and hasattr(client, "disconnect"):
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-    clean_session_files()
-    whatsapp_state["connected"] = False
-    whatsapp_state["phone"] = None
-    whatsapp_state["qr"] = None
-    whatsapp_state["qr_svg"] = None
-
-    client_thread = threading.Thread(target=run_neonize_client, daemon=True)
-    client_thread.start()
+    if not HAS_NEONIZE:
+        return False
+    with client_lock:
+        if whatsapp_state.get("connected") or (client and getattr(client, "is_logged_in", False)):
+            return False
+        if client_thread and client_thread.is_alive():
+            return False
+        print("🔄 [RECONNECT TRIGGER] Starting pairing handshake without deleting the saved session...")
+        client_thread = threading.Thread(target=run_neonize_client, daemon=True)
+        client_thread.start()
+        return True
 
 # --- Summarization Engine (Ollama Gemma 2B Local AI) ---
 def call_ollama_summarize(group_name: str, messages: list) -> str:
@@ -486,9 +569,17 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
+    def end_headers(self):
+        origin = self.headers.get("Origin")
+        if origin in ALLOWED_FRONTEND_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
@@ -519,7 +610,6 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(whatsapp_state).encode("utf-8"))
 
@@ -528,7 +618,6 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 groups = get_whitelisted_groups_list()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     "groups": groups,
@@ -538,17 +627,8 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             except Exception as ge:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"groups": [], "error": str(ge)}).encode("utf-8"))
-
-        elif self.path in ("/refresh_qr", "/refresh"):
-            trigger_fresh_qr()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": "Fresh QR handshake initiated"}).encode("utf-8"))
 
         elif self.path == "/tasks":
             try:
@@ -572,13 +652,11 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"tasks": tasks_list, "count": len(tasks_list)}).encode("utf-8"))
             except Exception as te:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"tasks": [], "error": str(te)}).encode("utf-8"))
 
@@ -680,7 +758,6 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     "summaries": summaries,
@@ -689,7 +766,6 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             except Exception as sum_err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(sum_err), "summaries": [], "ollama_status": "offline"}).encode("utf-8"))
 
@@ -698,13 +774,24 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.send_error(400, "Invalid Content-Length")
+            return
+        if content_length < 0 or content_length > 1024 * 1024:
+            self.send_error(413, "Request body exceeds 1 MiB")
+            return
+
         if self.path in ("/refresh_qr", "/refresh"):
-            trigger_fresh_qr()
+            started = trigger_fresh_qr()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps({"success": True, "message": "Fresh QR handshake initiated"}).encode("utf-8"))
+            self.wfile.write(json.dumps({
+                "success": bool(started),
+                "message": "Pairing handshake started" if started else "Pairing is unavailable, already running, or already connected"
+            }).encode("utf-8"))
 
         elif self.path in ("/groups/toggle", "/whitelist/toggle"):
             content_length = int(self.headers.get('Content-Length', 0))
@@ -717,17 +804,22 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                     conn = get_db()
                     cur = conn.cursor()
                     cur.execute("UPDATE whitelisted_groups SET is_active = ? WHERE jid = ?", (is_active, jid))
+                    changed = cur.rowcount
                     conn.commit()
                     conn.close()
+                    if not changed:
+                        self.send_response(404)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"success": False, "error": "Group not found"}).encode("utf-8"))
+                        return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True, "jid": jid, "is_active": bool(is_active)}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
 
@@ -750,13 +842,11 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                     conn.close()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
 
@@ -774,13 +864,11 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                     conn.close()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
 
@@ -795,15 +883,22 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 text = data.get("message") or data.get("text", "")
 
                 task_id = process_inbound_message(group_jid, group_name, sender, text)
+                if not task_id:
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "success": False,
+                        "reason": "Group is not enabled in the whitelist"
+                    }).encode("utf-8"))
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True, "task_id": task_id}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
 
@@ -818,7 +913,6 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 if not target_jid or not message_text:
                     self.send_response(400)
                     self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
                     self.end_headers()
                     self.wfile.write(json.dumps({"success": False, "error": "Missing jid or message"}).encode("utf-8"))
                     return
@@ -827,21 +921,26 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 if len(raw_user) == 10 and raw_user.isdigit():
                     raw_user = "91" + raw_user
 
-                if HAS_NEONIZE:
-                    jid_obj = build_jid(raw_user, "s.whatsapp.net")
-                    outbound_queue.put((jid_obj, message_text, raw_user))
-                else:
-                    print(f"📥 [SIMULATED OUTBOUND ENQUEUED] Target: {raw_user}@s.whatsapp.net | Msg: '{message_text[:40]}...'")
+                if not HAS_NEONIZE or not whatsapp_state.get("connected"):
+                    self.send_response(503)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "success": False,
+                        "error": "WhatsApp is not connected"
+                    }).encode("utf-8"))
+                    return
+
+                jid_obj = build_jid(raw_user, "s.whatsapp.net")
+                outbound_queue.put((jid_obj, message_text, raw_user))
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
 
@@ -857,24 +956,23 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": True, "status": whatsapp_state}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"success": False, "error": str(err)}).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
 
 def run_http_server():
-    server_address = ('', 5001)
+    server_address = ('127.0.0.1', 5001)
     httpd = ReusableHTTPServer(server_address, DaemonHTTPHandler)
     print("🚀 [DAEMON SERVER] Neonize HTTP API listening on http://localhost:5001")
     httpd.serve_forever()

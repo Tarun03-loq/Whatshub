@@ -15,10 +15,18 @@ if not exist "%PYTHON_EXE%" (
 
 cd /d "%~dp0"
 
+echo Installing/checking project dependencies...
+"%PYTHON_EXE%" -m pip install -r backend\requirements.txt
+if errorlevel 1 (
+    echo [ERROR] Dependency installation failed.
+    pause
+    exit /b 1
+)
+
 echo [1/3] Checking Ollama AI engine...
 curl -s http://localhost:11434 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    echo     [OK] Ollama is active (Gemma 2B ready).
+    echo     [OK] Ollama is active.
 ) else (
     echo     [INFO] Starting Ollama in background...
     start "" /b ollama serve >nul 2>&1
@@ -29,19 +37,19 @@ start "WhatsHub - WhatsApp Daemon (:5001)" cmd /k ""%PYTHON_EXE%" backend\listen
 
 timeout /t 2 /nobreak >nul
 
-echo [3/3] Starting WhatsHub Web Server on port 8000...
-start "WhatsHub - Web Server (:8000)" cmd /k ""%PYTHON_EXE%" -m http.server 8000"
+echo [3/3] Starting WhatsHub Web Server on port 8080...
+start "WhatsHub - Web Server (:8080)" cmd /k ""%PYTHON_EXE%" -m http.server 8080 --bind 127.0.0.1"
 
 timeout /t 2 /nobreak >nul
 
 echo.
 echo ============================================================
 echo  [READY] Launching WhatsHub in your default browser...
-echo  Link: http://localhost:8000
+echo  Link: http://127.0.0.1:8080
 echo ============================================================
-start http://localhost:8000
+start http://127.0.0.1:8080
 
 echo.
 echo All services are running! You can keep this window open or close it.
-echo To present, simply use the browser window at http://localhost:8000.
+echo To present, simply use the browser window at http://127.0.0.1:8080.
 pause

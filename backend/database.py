@@ -71,10 +71,11 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM whitelisted_groups")
     if cursor.fetchone()[0] == 0:
         initial_groups = [
-            ("120363028192847@g.us", "College CSE Final Year", "🎓", 1),
-            ("120363099991234@g.us", "Team Hacknova Hackathon", "🚀", 1),
-            ("120363011122334@g.us", "Apartment Residents Association", "🏢", 1),
-            ("120363088877665@g.us", "Family Group", "👨‍👩‍👧", 1),
+            # Seed known groups as disabled; the user must explicitly opt in.
+            ("120363028192847@g.us", "College CSE Final Year", "🎓", 0),
+            ("120363099991234@g.us", "Team Hacknova Hackathon", "🚀", 0),
+            ("120363011122334@g.us", "Apartment Residents Association", "🏢", 0),
+            ("120363088877665@g.us", "Family Group", "👨‍👩‍👧", 0),
         ]
         cursor.executemany(
             "INSERT INTO whitelisted_groups (jid, name, icon, is_active, added_at) VALUES (?, ?, ?, ?, datetime('now'))",

@@ -29,8 +29,13 @@ echo [1/2] Verifying Python runtime:
 %PYTHON_CMD% --version
 echo.
 
-echo [2/2] Checking dependencies (neonize, segno, requests)...
-%PYTHON_CMD% -m pip install neonize segno requests fastapi uvicorn pydantic python-dateutil --quiet
+echo [2/2] Installing project dependencies...
+%PYTHON_CMD% -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo [ERROR] Dependency installation failed.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================================
