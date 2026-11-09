@@ -24,7 +24,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from database import get_db, init_db
-from extractor import extract_task_from_message
+from extractor import extract_task_from_message, generate_coherent_topic_summary
 
 OLLAMA_MODEL = "gemma:2b"
 ALLOWED_FRONTEND_ORIGINS = {
@@ -218,6 +218,28 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
         conn.commit()
         conn.close()
         print(f"[Neonize] ✅ Task stored in SQLite [{task_id}]: {extracted.get('title')} ({extracted.get('priority', '').upper()})")
+        # Also create calendar event if deadline present
+        if extracted.get('deadline'):
+            try:
+                cal_conn = get_db()
+                cal_cur = cal_conn.cursor()
+                event_id = f"event-{uuid.uuid4().hex[:8]}"
+                cal_cur.execute("""
+                    INSERT INTO calendar_events (id, title, description, start_iso, end_iso, group_jid)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    event_id,
+                    extracted.get('title') or 'Untitled',
+                    extracted.get('summary') or '',
+                    extracted.get('deadline'),
+                    None,
+                    group_jid
+                ))
+                cal_conn.commit()
+                cal_conn.close()
+                print(f"[Calendar] ✅ Event created for task {task_id}")
+            except Exception as ce:
+                print(f"[Calendar] Error creating event for task {task_id}: {ce}")
     except Exception as db_err:
         print(f"[Neonize] Database error: {db_err}")
         return None
@@ -337,6 +359,35 @@ def setup_client_events(cl):
         return
 
     def on_qr(_: NewClient, data_qr: bytes):
+        # Throttle QR generation – only emit a new QR if at least 5 seconds have passed
+        now_ts = time.time()
+        last_ts = whatsapp_state.get("qr_ts", 0)
+        if now_ts - last_ts < 5:
+            # Skip update to avoid flooding the UI; keep the previous QR until it expires.
+            return
+        try:
+            qr_text = data_qr.decode("utf-8", errors="replace") if isinstance(data_qr, bytes) else str(data_qr)
+            qr_obj = segno.make_qr(qr_text)
+            qr_uri = qr_obj.png_data_uri(scale=8, border=4)
+            qr_svg = qr_obj.svg_data_uri(scale=8, border=4)
+            qr_b64 = base64.b64encode(qr_text.encode("utf-8")).decode("utf-8")
+            whatsapp_state["qr"] = qr_uri
+            whatsapp_state["qr_svg"] = qr_svg
+            whatsapp_state["raw_qr"] = qr_text
+            whatsapp_state["raw_b64"] = qr_b64
+            whatsapp_state["connected"] = False
+            whatsapp_state["qr_ts"] = now_ts
+            whatsapp_state["expires_in"] = 30
+            print(f"\n[on_qr FIRED] WhatsApp Pairing QR Ready (PNG len={len(qr_uri)}, SVG len={len(qr_svg)})")
+            print("[QR READY] Scan in WhatsApp: Settings > Linked Devices > Link a Device")
+            try:
+                qr_obj.terminal(compact=True)
+            except Exception:
+                pass
+        except Exception as qr_err:
+            import traceback
+            print(f"[QR GEN ERROR] {qr_err}")
+            traceback.print_exc()
         try:
             qr_text = data_qr.decode("utf-8", errors="replace") if isinstance(data_qr, bytes) else str(data_qr)
             qr_obj = segno.make_qr(qr_text)
@@ -660,7 +711,138 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"tasks": [], "error": str(te)}).encode("utf-8"))
 
-        elif self.path == "/summarize":
+        elif self.path in ("/summarize", "/summaries"):
+            try:
+                conn = get_db()
+                cur = conn.cursor()
+                # Find all distinct groups with messages
+                cur.execute("""
+                    SELECT DISTINCT group_jid, group_name
+                    FROM tasks
+                    WHERE group_jid IS NOT NULL AND group_jid != ''
+                """)
+                groups_rows = cur.fetchall()
+                summaries_list = []
+
+                for row in groups_rows:
+                    g_jid = row["group_jid"]
+                    g_name = row["group_name"] or f"Group {g_jid[:8]}"
+
+                    cur.execute("""
+                        SELECT * FROM tasks
+                        WHERE group_jid = ?
+                        ORDER BY 
+                          CASE priority 
+                            WHEN 'high' THEN 1 
+                            WHEN 'medium' THEN 2 
+                            WHEN 'low' THEN 3 
+                            ELSE 4 
+                          END ASC,
+                          created_at DESC
+                    """, (g_jid,))
+                    g_tasks = [dict(r) for r in cur.fetchall()]
+
+                    # Generate topic-grouped, priority-ordered 5-10 line summary
+                    summary_result = generate_coherent_topic_summary(g_name, g_tasks)
+
+                    latest_time = g_tasks[0].get("created_at") if g_tasks else datetime.now().isoformat()
+
+                    summaries_list.append({
+                        "group_jid": g_jid,
+                        "group_name": g_name,
+                        "message_count": len(g_tasks),
+                        "last_updated": latest_time,
+                        "summary": summary_result["summary"],
+                        "priority": summary_result["top_priority"],
+                        "topic_count": summary_result["topic_count"],
+                        "topics": summary_result.get("topics", []),
+                        "ai_model": "Gemma 2B (Ollama Local)"
+                    })
+
+                conn.close()
+
+                # Sort the summary cards strictly by priority (High -> Medium -> Low), then latest update
+                prio_order = {"high": 1, "medium": 2, "low": 3}
+                summaries_list.sort(key=lambda s: (prio_order.get(s["priority"], 4), s["last_updated"]), reverse=False)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "summaries": summaries_list,
+                    "ollama_status": "online",
+                    "count": len(summaries_list)
+                }).encode("utf-8"))
+            except Exception as se:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"summaries": [], "error": str(se)}).encode("utf-8"))
+
+        elif self.path.startswith("/calendar"):  # Calendar CRUD
+            # GET /calendar?date=YYYY-MM-DD   -> list events for that date
+            # POST /calendar/add               -> add new event (JSON body)
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            if self.command == "GET":
+                qs = parse_qs(parsed.query)
+                date_str = qs.get("date", [None])[0]
+                conn = get_db()
+                cur = conn.cursor()
+                if date_str:
+                    # Fetch events where start_iso is on the requested date
+                    cur.execute("""
+                        SELECT * FROM calendar_events
+                        WHERE date(start_iso) = date(?)
+                        ORDER BY start_iso ASC
+                    """, (date_str,))
+                else:
+                    # Return all upcoming events
+                    cur.execute("""
+                        SELECT * FROM calendar_events
+                        WHERE datetime(start_iso) >= datetime('now')
+                        ORDER BY start_iso ASC
+                    """)
+                events = [dict(row) for row in cur.fetchall()]
+                conn.close()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"events": events}).encode("utf-8"))
+                return
+            elif self.command == "POST" and parsed.path == "/calendar/add":
+                try:
+                    data = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                    # Expected keys: title, description, start_iso, end_iso (optional), group_jid (optional)
+                    required = ["title", "start_iso"]
+                    if not all(k in data for k in required):
+                        raise ValueError("Missing required fields")
+                    event_id = f"event-{uuid.uuid4().hex[:8]}"
+                    conn = get_db()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT INTO calendar_events (id, title, description, start_iso, end_iso, group_jid)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        event_id,
+                        data.get("title"),
+                        data.get("description"),
+                        data.get("start_iso"),
+                        data.get("end_iso"),
+                        data.get("group_jid")
+                    ))
+                    conn.commit()
+                    conn.close()
+                    self.send_response(201)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"id": event_id, "status": "created"}).encode("utf-8"))
+                except Exception as e:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
             try:
                 summaries = []
                 ollama_status = "offline"

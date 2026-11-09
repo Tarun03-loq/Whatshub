@@ -745,23 +745,135 @@ function renderSummariesPanel() {
   }
 
   count.textContent = state.summaries.length + " groups";
-  panel.innerHTML = state.summaries.map(s => `
-    <div class="summary-card">
+  panel.innerHTML = state.summaries.map((s, idx) => {
+    const prioColor = s.priority === "high" ? "#f87171" : s.priority === "medium" ? "#fbbf24" : "var(--wa-green)";
+    const prioLabel = (s.priority || "low").toUpperCase();
+    const topicCount = (s.topics && s.topics.length) ? s.topics.length : 1;
+    return `
+    <div class="summary-card interactive-group-card" data-summary-idx="${idx}" style="border-left: 3px solid ${prioColor}; cursor: pointer; transition: transform 0.15s, background 0.15s;" title="Tap to explore categorized topics">
       <div class="summary-card-header">
         <div class="summary-group-name">
-          <span class="group-dot"></span>
+          <span class="group-dot" style="background:${prioColor};"></span>
           ${escHtml(s.group_name)}
+          <span style="font-size:10px;font-weight:700;color:${prioColor};background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;margin-left:6px;">${prioLabel}</span>
+          <span style="font-size:10px;color:var(--text-muted);background:rgba(255,255,255,0.04);padding:2px 6px;border-radius:4px;margin-left:4px;">${topicCount} topic${topicCount !== 1 ? 's' : ''}</span>
         </div>
         <span class="summary-msg-count">${s.message_count} msg${s.message_count !== 1 ? "s" : ""}</span>
       </div>
-      <div class="summary-text">${escHtml(s.summary)}</div>
-      <div class="summary-footer">
+      <div class="summary-text" style="white-space:pre-line;">${escHtml(s.summary)}</div>
+      <div class="summary-footer" style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
         <span class="summary-time">${relTime(s.last_updated)}</span>
-        <span class="ai-badge">${state.ollama === "online" ? "🟢 Gemma 2B AI" : "📝 AI Summary"}</span>
+        <span style="font-size:11px;color:var(--wa-green);font-weight:600;">Tap to view topics ➔</span>
       </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
+
+  // Attach click listener to each summary card to open the group topics modal
+  panel.querySelectorAll(".interactive-group-card").forEach(card => {
+    card.addEventListener("click", () => {
+      const idx = parseInt(card.dataset.summaryIdx, 10);
+      const groupData = state.summaries[idx];
+      if (groupData) {
+        openGroupTopicsModal(groupData);
+      }
+    });
+  });
 }
+
+let currentActiveGroupData = null;
+
+/* ── MODAL 1: GROUP TOPICS BREAKDOWN ── */
+function openGroupTopicsModal(group) {
+  currentActiveGroupData = group;
+  const titleEl = document.getElementById("group-topics-title");
+  const subEl = document.getElementById("group-topics-subtitle");
+  const overviewEl = document.getElementById("group-topics-overview");
+  const listEl = document.getElementById("group-topics-list");
+
+  if (titleEl) titleEl.textContent = group.group_name || "Group Topics";
+  if (subEl) subEl.textContent = `${group.message_count} messages · Priority: ${(group.priority || "low").toUpperCase()}`;
+  if (overviewEl) overviewEl.textContent = group.summary || "Conversation categorized into topics below:";
+
+  const topics = group.topics || [];
+  if (listEl) {
+    if (!topics.length) {
+      listEl.innerHTML = `<div style="text-align:center;padding:16px;color:var(--text-muted);">No separate topics found.</div>`;
+    } else {
+      listEl.innerHTML = topics.map((top, tIdx) => {
+        const topColor = top.priority === "high" ? "#f87171" : top.priority === "medium" ? "#fbbf24" : "var(--wa-green)";
+        return `
+          <div class="topic-row-card" data-topic-idx="${tIdx}" style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${topColor};border-radius:8px;padding:12px 14px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:background 0.15s;" onmouseover="this.style.background='var(--bg-input)'" onmouseout="this.style.background='var(--bg-card)'">
+            <div style="flex:1;">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span style="font-size:10px;font-weight:700;color:${topColor};background:rgba(255,255,255,0.06);padding:2px 6px;border-radius:4px;">${(top.priority || "low").toUpperCase()}</span>
+                <span style="font-weight:600;font-size:13px;color:var(--text);">${escHtml(top.name)}</span>
+              </div>
+              <div style="font-size:11.5px;color:var(--text-muted);">
+                ${top.items_count} message${top.items_count !== 1 ? 's' : ''} ${top.deadlines && top.deadlines.length ? '· ⏰ ' + escHtml(top.deadlines.join(', ')) : ''}
+              </div>
+            </div>
+            <div style="font-size:12px;color:var(--wa-green);font-weight:600;margin-left:12px;">
+              Details ➔
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      listEl.querySelectorAll(".topic-row-card").forEach(el => {
+        el.addEventListener("click", () => {
+          const tIdx = parseInt(el.dataset.topicIdx, 10);
+          const selectedTopic = topics[tIdx];
+          if (selectedTopic) {
+            openTopicDetailModal(group, selectedTopic);
+          }
+        });
+      });
+    }
+  }
+
+  openModal("modal-group-topics");
+}
+
+/* ── MODAL 2: ELABORATE TOPIC DETAILS ── */
+function openTopicDetailModal(group, topic) {
+  const titleEl = document.getElementById("topic-detail-title");
+  const groupEl = document.getElementById("topic-detail-group");
+  const summaryEl = document.getElementById("topic-detail-summary");
+  const messagesEl = document.getElementById("topic-detail-messages");
+
+  if (titleEl) titleEl.textContent = topic.name;
+  if (groupEl) groupEl.textContent = `${group.group_name} · Priority: ${(topic.priority || "low").toUpperCase()} · ${topic.items_count} messages`;
+  if (summaryEl) summaryEl.textContent = topic.elaborate_summary || "No elaborate summary available.";
+
+  if (messagesEl) {
+    const msgs = topic.recent_messages || [];
+    if (!msgs.length) {
+      messagesEl.innerHTML = `<div style="text-align:center;padding:12px;color:var(--text-muted);font-size:12px;">No individual message records.</div>`;
+    } else {
+      messagesEl.innerHTML = msgs.map(m => `
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:8px 10px;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:3px;font-size:10.5px;color:var(--text-muted);">
+            <span style="font-weight:600;color:var(--wa-green);">${escHtml(m.sender || "Sender")}</span>
+            <span>${relTime(m.created_at)}</span>
+          </div>
+          <div style="font-size:12px;color:var(--text);line-height:1.4;">${escHtml(m.text)}</div>
+        </div>
+      `).join("");
+    }
+  }
+
+  closeModal("modal-group-topics");
+  openModal("modal-topic-detail");
+}
+
+// Back button handler from Topic Details back to Group Topics
+document.getElementById("btn-back-to-group-topics")?.addEventListener("click", () => {
+  closeModal("modal-topic-detail");
+  if (currentActiveGroupData) {
+    openGroupTopicsModal(currentActiveGroupData);
+  }
+});
 
 /* ── RENDER PRIORITY QUEUE SPACE (Strict Priority Order: High -> Medium -> Low) ── */
 function renderPriorityPanel() {
@@ -1155,20 +1267,25 @@ async function refreshAll() {
 
 /* ── INIT ── */
 document.addEventListener("DOMContentLoaded", async () => {
+  // Load demo data only for the brief offline preview
   state.tasks = SAMPLE_TASKS;
   state.summaries = SAMPLE_SUMMARIES;
   renderAll();
 
+  // Try to connect to the daemon – this will clear the demo data when live
   await refreshAll();
 
+  // Periodic daemon health check + live data refresh
   state.daemonTimer = setInterval(async () => {
     await checkDaemonStatus();
     if (state.isLive || state.wa.connected) {
       await fetchTasks();
       await fetchSummaries();
+      await fetchCalendar();
       renderAll();
     }
   }, 4000);
 
+  // Ollama model health check
   setInterval(checkOllama, 10000);
 });

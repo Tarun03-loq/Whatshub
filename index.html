@@ -349,6 +349,7 @@
       font-size: 12.5px;
       color: var(--text-muted);
       line-height: 1.55;
+      white-space: pre-line;
     }
     .summary-footer {
       display: flex; align-items: center; justify-content: space-between;
@@ -1123,6 +1124,51 @@
     <div class="modal-foot">
       <span style="font-size:11px;color:var(--text-muted);flex:1;">Active groups are summarized by Gemma 2B AI in real-time</span>
       <button class="btn btn-primary" data-close="modal-whitelist">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: Group Topics Breakdown -->
+<div class="modal-overlay" id="modal-group-topics">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div>
+        <h3 id="group-topics-title">Group Conversation Topics</h3>
+        <p id="group-topics-subtitle">Categories & Elaborate Summaries</p>
+      </div>
+      <button class="modal-close" data-close="modal-group-topics">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="group-topics-overview" style="background:var(--bg-input);border-radius:8px;padding:12px 14px;font-size:12.5px;color:var(--text);line-height:1.5;margin-bottom:14px;white-space:pre-line;"></div>
+      <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:10px;letter-spacing:0.5px;">Categorized Topics (Tap to View Elaborate Details)</div>
+      <div id="group-topics-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+    </div>
+    <div class="modal-foot">
+      <span style="font-size:11px;color:var(--text-muted);flex:1;">Ordered by Priority (High ➔ Medium ➔ Low)</span>
+      <button class="btn btn-primary" data-close="modal-group-topics">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: Topic Elaborate Details -->
+<div class="modal-overlay" id="modal-topic-detail">
+  <div class="modal-card wide">
+    <div class="modal-head">
+      <div>
+        <h3 id="topic-detail-title">Topic Details</h3>
+        <p id="topic-detail-group">Group Name · Priority</p>
+      </div>
+      <button class="modal-close" data-close="modal-topic-detail">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="background:var(--bg-input);border-radius:8px;padding:14px 16px;font-size:13px;color:var(--text);line-height:1.6;margin-bottom:16px;white-space:pre-line;" id="topic-detail-summary"></div>
+      
+      <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px;letter-spacing:0.5px;">Associated Messages In This Topic</div>
+      <div id="topic-detail-messages" style="display:flex;flex-direction:column;gap:8px;max-height:240px;overflow-y:auto;padding-right:4px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-secondary" id="btn-back-to-group-topics">⬅ Back to Topics</button>
+      <button class="btn btn-primary" data-close="modal-topic-detail">Done</button>
     </div>
   </div>
 </div>
