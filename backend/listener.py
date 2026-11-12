@@ -212,7 +212,7 @@ def process_inbound_message(group_jid: str, group_name: str, sender: str, text: 
             extracted.get("confidence", "98.9%"),
             "pending",
             attachment_path,
-            "Gemma 2B (Ollama Local)",
+            "AI Engine",
             datetime.now().isoformat()
         ))
         conn.commit()
@@ -782,18 +782,24 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             try:
                 conn = get_db()
                 cur = conn.cursor()
-                # Find all distinct groups with messages
+                
+                # Fetch all distinct groups from both tasks and messages_log
                 cur.execute("""
                     SELECT DISTINCT group_jid, group_name
                     FROM tasks
                     WHERE group_jid IS NOT NULL AND group_jid != ''
+                    UNION
+                    SELECT DISTINCT ml.group_jid, wg.name as group_name
+                    FROM messages_log ml
+                    LEFT JOIN whitelisted_groups wg ON ml.group_jid = wg.jid
+                    WHERE ml.group_jid IS NOT NULL AND ml.group_jid != ''
                 """)
                 groups_rows = cur.fetchall()
                 summaries_list = []
 
                 for row in groups_rows:
                     g_jid = row["group_jid"]
-                    g_name = row["group_name"] or f"Group {g_jid[:8]}"
+                    g_name = row["group_name"] or f"Group {g_jid.split('@')[0][:10]}"
 
                     cur.execute("""
                         SELECT * FROM tasks
@@ -809,6 +815,35 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                     """, (g_jid,))
                     g_tasks = [dict(r) for r in cur.fetchall()]
 
+                    # If no tasks extracted yet, synthesize task items from recent messages_log
+                    if not g_tasks:
+                        cur.execute("""
+                            SELECT id, content as raw_message, sender, processed_at as created_at
+                            FROM messages_log
+                            WHERE group_jid = ?
+                            ORDER BY id DESC
+                            LIMIT 15
+                        """, (g_jid,))
+                        log_rows = cur.fetchall()
+                        for lr in log_rows:
+                            g_tasks.append({
+                                "id": f"msg-{lr['id']}",
+                                "title": lr["raw_message"][:50],
+                                "summary": lr["raw_message"],
+                                "raw_message": lr["raw_message"],
+                                "group_name": g_name,
+                                "group_jid": g_jid,
+                                "sender": lr["sender"] or "Member",
+                                "priority": "medium",
+                                "item_type": "assignment",
+                                "category": "college",
+                                "deadline_display": "TBD",
+                                "created_at": lr["created_at"]
+                            })
+
+                    if not g_tasks:
+                        continue
+
                     # Generate topic-grouped, priority-ordered 5-10 line summary
                     summary_result = generate_coherent_topic_summary(g_name, g_tasks)
 
@@ -823,7 +858,7 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                         "priority": summary_result["top_priority"],
                         "topic_count": summary_result["topic_count"],
                         "topics": summary_result.get("topics", []),
-                        "ai_model": "Gemma 2B (Ollama Local)"
+                        "ai_model": "AI Engine"
                     })
 
                 conn.close()
@@ -910,113 +945,10 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
                 return
-            try:
-                summaries = []
-                ollama_status = "offline"
-
-                try:
-                    import urllib.request as _ur
-                    _ur.urlopen("http://localhost:11434", timeout=2)
-                    ollama_status = "online"
-                except Exception:
-                    pass
-
-                conn = get_db()
-                cur = conn.cursor()
-
-                # Get only active whitelisted groups
-                cur.execute("SELECT jid, name FROM whitelisted_groups WHERE is_active = 1")
-                active_groups = {r["jid"]: r["name"] for r in cur.fetchall()}
-
-                # Fetch recent messages from messages_log
-                cur.execute("""
-                    SELECT group_jid, sender, content, processed_at
-                    FROM messages_log
-                    WHERE was_whitelisted = 1
-                    ORDER BY processed_at DESC
-                    LIMIT 60
-                """)
-                rows = cur.fetchall()
-
-                # Group by JID
-                groups_map = {}
-                for row in rows:
-                    jid = row["group_jid"]
-                    # If active whitelist configured, filter strictly
-                    if active_groups and jid not in active_groups:
-                        continue
-                    if jid not in groups_map:
-                        groups_map[jid] = []
-                    if len(groups_map[jid]) < 6:
-                        groups_map[jid].append({
-                            "sender": row["sender"],
-                            "content": row["content"],
-                            "processed_at": row["processed_at"]
-                        })
-
-                # Also fetch recent tasks
-                cur.execute("""
-                    SELECT group_jid, group_name, title, summary, priority, deadline_display, created_at
-                    FROM tasks
-                    ORDER BY created_at DESC
-                    LIMIT 40
-                """)
-                task_rows = cur.fetchall()
-                conn.close()
-
-                for tr in task_rows:
-                    gj = tr["group_jid"]
-                    if gj and gj not in active_groups and not active_groups:
-                        active_groups[gj] = tr["group_name"]
-
-                # Process Ollama summaries for each group
-                for jid, msgs in list(groups_map.items())[:6]:
-                    gname = active_groups.get(jid, f"Group {jid.split('@')[0]}")
-                    ai_summary = call_ollama_summarize(gname, msgs)
-
-                    summaries.append({
-                        "group_jid": jid,
-                        "group_name": gname,
-                        "summary": ai_summary,
-                        "message_count": len(msgs),
-                        "last_updated": msgs[0]["processed_at"] if msgs else "",
-                        "ai_model": f"Gemma 2B (Ollama)" if ollama_status == "online" else "AI Task Engine"
-                    })
-
-                # Append task-based summaries for active groups with tasks
-                if task_rows:
-                    existing_jids = {s["group_jid"] for s in summaries}
-                    tasks_by_group = {}
-                    for tr in task_rows:
-                        gj = tr["group_jid"]
-                        if gj not in existing_jids and (not active_groups or gj in active_groups):
-                            if gj not in tasks_by_group:
-                                tasks_by_group[gj] = {"name": tr["group_name"], "tasks": []}
-                            if len(tasks_by_group[gj]["tasks"]) < 3:
-                                tasks_by_group[gj]["tasks"].append(f"{tr['title']} ({tr['priority']} priority, {tr['deadline_display']})")
-
-                    for gj, info in list(tasks_by_group.items())[:4]:
-                        summaries.append({
-                            "group_jid": gj,
-                            "group_name": info["name"],
-                            "summary": "Key Tasks: " + "; ".join(info["tasks"]),
-                            "message_count": len(info["tasks"]),
-                            "last_updated": datetime.now().isoformat(),
-                            "ai_model": "Gemma 2B (Ollama)" if ollama_status == "online" else "AI Task Engine"
-                        })
-
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+            else:
+                self.send_response(404)
                 self.end_headers()
-                self.wfile.write(json.dumps({
-                    "summaries": summaries,
-                    "ollama_status": ollama_status
-                }).encode("utf-8"))
-            except Exception as sum_err:
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": str(sum_err), "summaries": [], "ollama_status": "offline"}).encode("utf-8"))
+                return
 
         else:
             self.send_response(404)

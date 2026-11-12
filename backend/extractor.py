@@ -64,14 +64,15 @@ ACTIONABLE_KEYWORDS = [
 
 def is_actionable_task(task: dict) -> bool:
     """
-    Filters out unwanted chatter, pure festival/birthday greetings, and non-actionable chatter
-    so that only genuine priority tasks, deadlines, reviews, and action items appear in the Priority Queue.
+    Strict filter for Priority Queue: only display tasks that have a real
+    submission deadline, event date, meeting time, or review/exam schedule.
+    General chats, casual messages, and tasks without concrete dates are excluded.
     """
     msg = (task.get("raw_message") or "").strip().lower()
     title = (task.get("title") or "").strip().lower()
     full = msg + " " + title
     
-    # 1. Greetings, celebratory wishes are not tasks
+    # 1. Greetings, celebratory wishes are never tasks
     if any(g in full for g in ["happy birthday", "happy diwali", "deepavali", "birthday wishes", "congratulations", "many more happy returns"]):
         return False
         
@@ -79,19 +80,31 @@ def is_actionable_task(task: dict) -> bool:
     cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', msg).strip()
     if len(cleaned) < 5 or CASUAL_NOISE_REGEX.match(cleaned):
         return False
-        
-    # 3. High or medium priority items with substance
-    if task.get("priority") in ["high", "medium"]:
+
+    # 3. Must have an actual deadline/date — this is the key gate
+    dl = task.get("deadline_display") or ""
+    has_real_deadline = dl and dl not in ["In 2 days", "None", "TBD", ""]
+    
+    # 4. Check item_type for event/submission/meeting types
+    item_type = (task.get("item_type") or "").lower()
+    is_event_type = item_type in ("submission", "duedate", "meeting", "cultural")
+    
+    # 5. Check for submission/event keywords in message
+    EVENT_KEYWORDS = [
+        "submission", "submit", "due date", "deadline", "exam", "test",
+        "review", "cap review", "presentation", "ppt", "meeting", "meet",
+        "registration", "register", "interview", "schedule", "hall ticket",
+        "mandatory", "urgent", "attendance", "fill", "upload", "form"
+    ]
+    has_event_keyword = any(k in full for k in EVENT_KEYWORDS)
+
+    # Accept if: has real deadline OR (is event type AND has substance)
+    if has_real_deadline:
         return True
-        
-    # 4. Contains actionable task keywords
-    if any(k in full for k in ACTIONABLE_KEYWORDS):
-        if len(cleaned) > 8:
-            return True
-            
-    # 5. Has a specific real deadline
-    dl = task.get("deadline_display")
-    if dl and dl not in ["In 2 days", "None", "TBD"]:
+    if is_event_type and has_event_keyword and len(cleaned) > 8:
+        return True
+    # High priority with event keywords
+    if task.get("priority") == "high" and has_event_keyword:
         return True
         
     return False
@@ -404,7 +417,7 @@ def generate_coherent_topic_summary(group_name: str, tasks: list) -> dict:
 
     final_lines = summary_lines[:10]
     while len(final_lines) < 5:
-        final_lines.append(f"• Monitored by Gemma 2B AI: Continuous background aggregation active.")
+        final_lines.append(f"• Monitored by AI: Continuous background aggregation active.")
 
     formatted_summary = "\n".join(final_lines)
     return {

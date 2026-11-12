@@ -1,6 +1,6 @@
 /* ============================================================
    WhatsHub — Clean App Logic
-   WhatsApp Multi-Device Aggregator with Ollama Gemma 2B AI
+   WhatsApp Multi-Device Aggregator with AI Engine
    Displays: AI Summaries | Priority Queue | Group Chats | Calendar
 ============================================================ */
 
