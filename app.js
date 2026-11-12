@@ -432,11 +432,14 @@ document.getElementById("btn-disconnect")?.addEventListener("click", async () =>
   if (dot) dot.className = "dot";
   if (txt) txt.textContent = "Link WhatsApp";
   
-  // Completely clear old messages and summaries from the dashboard
+  // Completely clear old messages, summaries, and whitelist groups from the dashboard
   state.tasks = [];
   state.summaries = [];
+  state.whitelist = [];
   renderAll();
-  toast("WhatsApp disconnected. All dashboard messages cleared.", "🔴");
+  renderWhitelist();
+  renderGroupsPanel();
+  toast("WhatsApp disconnected. All dashboard messages and groups cleared.", "🔴");
   // Immediately request a fresh pairing QR for next connection
   requestFreshQR();
 });
@@ -560,10 +563,10 @@ function renderWhitelist() {
         return;
       }
 
-      // Re-summarize active groups with Ollama
+      // Re-summarize active groups with AI Engine
       await fetchSummaries();
       renderSummariesPanel();
-      toast(`Group '${grp.name}' ${grp.is_active ? "enabled for Ollama AI" : "ignored"}`, grp.is_active ? "🟢" : "⚪");
+      toast(`Group '${grp.name}' ${grp.is_active ? "enabled for AI Summaries" : "ignored"}`, grp.is_active ? "🟢" : "⚪");
     });
   });
 

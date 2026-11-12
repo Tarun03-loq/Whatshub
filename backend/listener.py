@@ -435,6 +435,7 @@ def setup_client_events(cl):
         whatsapp_state["phone"] = None
         whatsapp_state["qr"] = None
         whatsapp_state["qr_svg"] = None
+        clear_database_records(clear_whitelist=True)
 
     @cl.event(MessageEv)
     def on_message(_: NewClient, message: MessageEv):
@@ -502,17 +503,19 @@ def setup_client_events(cl):
         except Exception as err:
             print(f"❌ [ERROR] Error handling incoming WhatsApp message: {err}")
 
-def clear_database_records():
-    """Wipes tasks, calendar events, and raw messages log on user disconnect."""
+def clear_database_records(clear_whitelist: bool = False):
+    """Wipes tasks, calendar events, and raw messages log on user disconnect. Optionally clears whitelisted_groups."""
     try:
         conn = get_db()
         cur = conn.cursor()
         cur.execute("DELETE FROM tasks")
         cur.execute("DELETE FROM calendar_events")
         cur.execute("DELETE FROM messages_log")
+        if clear_whitelist:
+            cur.execute("DELETE FROM whitelisted_groups")
         conn.commit()
         conn.close()
-        print("🧹 [DATABASE] Cleared tasks, calendar_events, and messages_log successfully.")
+        print(f"🧹 [DATABASE] Cleared tasks, calendar_events, messages_log{' and whitelisted_groups' if clear_whitelist else ''} successfully.")
     except Exception as dbe:
         print(f"⚠️ [DATABASE] Error clearing records: {dbe}")
 
@@ -1138,7 +1141,7 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                         client = None
                 
                 clean_session_files()
-                clear_database_records()
+                clear_database_records(clear_whitelist=True)
 
                 whatsapp_state["connected"] = False
                 whatsapp_state["phone"] = None
