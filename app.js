@@ -436,19 +436,19 @@ document.getElementById("btn-disconnect")?.addEventListener("click", async () =>
   toast("WhatsApp disconnected. Restored demo preview.", "🔴");
 });
 
-/* ── OLLAMA STATUS CHECK ── */
+/* ── AI ENGINE STATUS CHECK ── */
 async function checkOllama() {
   const chip = document.getElementById("ollama-chip");
   if (!chip) return;
   try {
     const r = await fetch("http://localhost:11434", { signal: AbortSignal.timeout(2000) });
     state.ollama = "online";
-    chip.className = "ollama-chip";
-    chip.innerHTML = `<div class="dot"></div>Gemma 2B · Online`;
+    chip.className = "ai-engine-chip";
+    chip.innerHTML = `<div class="dot"></div>AI Engine · Online`;
   } catch (_) {
     state.ollama = "offline";
-    chip.className = "ollama-chip offline";
-    chip.innerHTML = `<div class="dot"></div>Gemma 2B · Offline`;
+    chip.className = "ai-engine-chip offline";
+    chip.innerHTML = `<div class="dot"></div>AI Engine · Standby`;
   }
 }
 
@@ -687,18 +687,18 @@ async function fetchSummaries() {
   }
 }
 
-/* ── TRIGGER OLLAMA RE-SUMMARIZATION ── */
+/* ── TRIGGER AI RE-SUMMARIZATION ── */
 document.getElementById("btn-summarize-now")?.addEventListener("click", async () => {
   const btn = document.getElementById("btn-summarize-now");
   btn.textContent = "⏳ Thinking...";
   btn.disabled = true;
-  toast("Running Gemma 2B AI summarization...", "🧠");
+  toast("Running AI summarization...", "🧠");
   await fetchSummaries();
   renderSummariesPanel();
   renderStats();
   btn.textContent = "🧠 Run AI";
   btn.disabled = false;
-  toast("Summaries updated by Gemma 2B AI!", "✨");
+  toast("Summaries updated!", "✨");
 });
 
 /* ── RENDER STATS ── */
@@ -730,7 +730,7 @@ function renderSummariesPanel() {
         <div class="empty-icon" style="font-size:36px;margin-bottom:10px;">🟢</div>
         <div class="empty-title" style="font-size:15px;font-weight:700;color:var(--wa-green);margin-bottom:6px;">WhatsApp Connected · Listening</div>
         <div class="empty-sub" style="font-size:12px;color:var(--text-muted);max-width:300px;margin:0 auto;line-height:1.5;">
-          Demo data cleared. Incoming messages from your active groups will be summarized here by Gemma 2B AI.
+          Demo data cleared. Incoming messages from your active groups will be summarized here by AI.
         </div>
       </div>`;
     } else {
@@ -1213,29 +1213,87 @@ document.getElementById("btn-run-sim")?.addEventListener("click", async () => {
   renderAll();
 
   closeModal("modal-simulate");
-  toast("Message processed by Gemma 2B AI & categorized!", "🧠");
+  toast("Message processed and categorized!", "🧠");
   btn.textContent = "🚀 Process with AI";
   btn.disabled = false;
 });
 
-/* ── SEARCH ── */
+/* ── DATABASE BACKED SEARCH ── */
+let searchDebounceTimer = null;
+
 document.getElementById("search-input")?.addEventListener("input", e => {
-  const q = e.target.value.toLowerCase();
-  if (!q) { renderPriorityPanel(); renderSummariesPanel(); return; }
-  const filtered = state.tasks.filter(t =>
-    (t.title || "").toLowerCase().includes(q) ||
-    (t.summary || "").toLowerCase().includes(q) ||
-    (t.group_name || "").toLowerCase().includes(q)
-  );
-  const panel = document.getElementById("priority-panel");
-  if (!panel) return;
-  if (!filtered.length) {
-    panel.innerHTML = `<div class="empty-state"><div class="empty-icon">🔍</div><div class="empty-title">No results</div></div>`;
-  } else {
-    panel.innerHTML = filtered.map(t => taskCard(t)).join("");
-    panel.querySelectorAll(".task-card").forEach((el, i) => el.addEventListener("click", () => openTaskModal(filtered[i])));
+  const q = e.target.value.trim();
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+
+  if (!q) {
+    renderPriorityPanel();
+    renderSummariesPanel();
+    return;
   }
+
+  searchDebounceTimer = setTimeout(async () => {
+    try {
+      const resp = await fetch(DAEMON + "/search?q=" + encodeURIComponent(q));
+      if (resp.ok) {
+        const data = await resp.json();
+        const results = data.results || [];
+        renderSearchResults(results, q);
+        return;
+      }
+    } catch (_) {}
+
+    // Local client-side fallback if daemon search fails
+    const lower = q.toLowerCase();
+    const filtered = state.tasks.filter(t =>
+      (t.title || "").toLowerCase().includes(lower) ||
+      (t.summary || "").toLowerCase().includes(lower) ||
+      (t.group_name || "").toLowerCase().includes(lower) ||
+      (t.raw_message || "").toLowerCase().includes(lower)
+    );
+    renderSearchResults(filtered, q);
+  }, 250);
 });
+
+function renderSearchResults(items, query) {
+  const panel = document.getElementById("priority-panel");
+  const count = document.getElementById("priority-count");
+  if (!panel) return;
+  if (count) count.textContent = `${items.length} found`;
+
+  if (!items.length) {
+    panel.innerHTML = `<div class="empty-state">
+      <div class="empty-icon">🔍</div>
+      <div class="empty-title">No messages found</div>
+      <div class="empty-sub">No database records matched "${escHtml(query)}".</div>
+    </div>`;
+    return;
+  }
+
+  panel.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--wa-green);margin-bottom:8px;text-transform:uppercase;">
+      Search Results for "${escHtml(query)}" (${items.length})
+    </div>
+    ` + items.map(t => {
+      const pColor = t.priority === "high" ? "#ea0038" : t.priority === "medium" ? "#f59e0b" : "var(--wa-green)";
+      const title = t.title || t.content || "Message";
+      const desc = t.summary || t.content || "";
+      const group = t.group_name || "WhatsApp Chat";
+      return `
+        <div class="task-card" style="border-left:3px solid ${pColor};">
+          <div class="task-card-top">
+            <span class="task-title">${escHtml(title.substring(0, 60))}</span>
+            <span class="task-priority-badge ${t.priority || 'low'}">${(t.priority || 'low').toUpperCase()}</span>
+          </div>
+          <div class="task-summary">${escHtml(desc.substring(0, 150))}</div>
+          <div class="task-meta">
+            <span class="task-chip group">💬 ${escHtml(group)}</span>
+            ${t.deadline_display ? `<span class="task-chip deadline">⏰ ${escHtml(t.deadline_display)}</span>` : ''}
+            <span class="task-chip">📅 ${relTime(t.created_at)}</span>
+          </div>
+        </div>
+      `;
+    }).join("");
+}
 
 /* ── RENDER ALL ── */
 function renderAll() {

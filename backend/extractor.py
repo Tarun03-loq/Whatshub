@@ -47,6 +47,56 @@ Return ONLY valid JSON:
 }
 """
 
+# Casual noise words that do not constitute action items
+CASUAL_NOISE_REGEX = re.compile(
+    r'^(ok|okay|k|mmm|mmmm|doneee|done|yes|no|yeah|yup|nope|cool|nice|super|seriii|da|paa|deii|wait|hi|hello|hey|gm|gn|good morning|good night|thanks|thank you|tc|\?+|!+|\.+)$',
+    re.IGNORECASE
+)
+
+ACTIONABLE_KEYWORDS = [
+    "submission", "submit", "record", "lab", "assignment", "deadline", "due", "due date",
+    "exam", "test", "review", "cap review", "presentation", "ppt", "slides", "topic",
+    "meeting", "meet", "audi", "project", "prototype", "round", "register", "registration",
+    "fee", "fees", "bill", "payment", "pay", "tneb", "cutoff", "urgent", "mandatory",
+    "form", "forms.gle", "fill", "linkedin", "sheet", "spreadsheet", "portal", "upload",
+    "attend", "attendance", "hall ticket", "schedule", "timing", "interview"
+]
+
+def is_actionable_task(task: dict) -> bool:
+    """
+    Filters out unwanted chatter, pure festival/birthday greetings, and non-actionable chatter
+    so that only genuine priority tasks, deadlines, reviews, and action items appear in the Priority Queue.
+    """
+    msg = (task.get("raw_message") or "").strip().lower()
+    title = (task.get("title") or "").strip().lower()
+    full = msg + " " + title
+    
+    # 1. Greetings, celebratory wishes are not tasks
+    if any(g in full for g in ["happy birthday", "happy diwali", "deepavali", "birthday wishes", "congratulations", "many more happy returns"]):
+        return False
+        
+    # 2. Filter out pure casual chatter or short reactions
+    cleaned = re.sub(r'[\U00010000-\U0010ffff]', '', msg).strip()
+    if len(cleaned) < 5 or CASUAL_NOISE_REGEX.match(cleaned):
+        return False
+        
+    # 3. High or medium priority items with substance
+    if task.get("priority") in ["high", "medium"]:
+        return True
+        
+    # 4. Contains actionable task keywords
+    if any(k in full for k in ACTIONABLE_KEYWORDS):
+        if len(cleaned) > 8:
+            return True
+            
+    # 5. Has a specific real deadline
+    dl = task.get("deadline_display")
+    if dl and dl not in ["In 2 days", "None", "TBD"]:
+        return True
+        
+    return False
+
+
 def extract_task_from_message(raw_text: str, attachment_path: str = None) -> dict:
     """
     Main extraction pipeline: OCR (PDF/Images) -> Gemma 2B (Ollama Local) -> SQLite Schema.

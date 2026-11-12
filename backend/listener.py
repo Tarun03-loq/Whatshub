@@ -24,7 +24,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 from database import get_db, init_db
-from extractor import extract_task_from_message, generate_coherent_topic_summary
+from extractor import extract_task_from_message, generate_coherent_topic_summary, is_actionable_task
 
 OLLAMA_MODEL = "gemma:2b"
 ALLOWED_FRONTEND_ORIGINS = {
@@ -681,7 +681,7 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"groups": [], "error": str(ge)}).encode("utf-8"))
 
-        elif self.path == "/tasks":
+        elif self.path.startswith("/tasks"):
             try:
                 conn = get_db()
                 cur = conn.cursor()
@@ -696,10 +696,13 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                         ELSE 4 
                       END ASC,
                       created_at DESC 
-                    LIMIT 60
+                    LIMIT 150
                 """)
-                tasks_list = [dict(r) for r in cur.fetchall()]
+                raw_tasks = [dict(r) for r in cur.fetchall()]
                 conn.close()
+
+                # Filter out unwanted chatter so Priority Queue only displays actionable tasks
+                tasks_list = [t for t in raw_tasks if is_actionable_task(t)]
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -710,6 +713,66 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"tasks": [], "error": str(te)}).encode("utf-8"))
+
+        elif self.path.startswith("/search"):
+            try:
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(self.path)
+                qs = parse_qs(parsed.query)
+                query = qs.get("q", [""])[0].strip()
+
+                conn = get_db()
+                cur = conn.cursor()
+                if query:
+                    param = f"%{query}%"
+                    cur.execute("""
+                        SELECT id, 'task' as source_type, title, summary, raw_message as content, 
+                               group_name, group_jid, sender, priority, deadline_display, created_at
+                        FROM tasks
+                        WHERE title LIKE ? OR summary LIKE ? OR raw_message LIKE ? OR group_name LIKE ? OR sender LIKE ?
+                        ORDER BY created_at DESC
+                        LIMIT 50
+                    """, (param, param, param, param, param))
+                    results = [dict(r) for r in cur.fetchall()]
+
+                    # Also query messages_log for any raw messages that match
+                    cur.execute("""
+                        SELECT id, 'log' as source_type, '' as title, '' as summary, content, 
+                               '' as group_name, group_jid, sender, 'low' as priority, '' as deadline_display, processed_at as created_at
+                        FROM messages_log
+                        WHERE content LIKE ?
+                        ORDER BY id DESC
+                        LIMIT 30
+                    """, (param,))
+                    log_results = [dict(r) for r in cur.fetchall()]
+                    
+                    # Combine without duplicate contents
+                    seen_content = set(r["content"] for r in results if r.get("content"))
+                    for lr in log_results:
+                        if lr["content"] not in seen_content:
+                            results.append(lr)
+                            seen_content.add(lr["content"])
+                else:
+                    cur.execute("""
+                        SELECT id, 'task' as source_type, title, summary, raw_message as content, 
+                               group_name, group_jid, sender, priority, deadline_display, created_at
+                        FROM tasks
+                        ORDER BY created_at DESC
+                        LIMIT 30
+                    """)
+                    results = [dict(r) for r in cur.fetchall()]
+
+                conn.close()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"results": results, "count": len(results), "query": query}).encode("utf-8"))
+            except Exception as se:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"results": [], "error": str(se)}).encode("utf-8"))
 
         elif self.path in ("/summarize", "/summaries"):
             try:

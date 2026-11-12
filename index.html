@@ -17,24 +17,25 @@
     :root {
       --wa-green: #25D366;
       --wa-green-dark: #128C7E;
-      --wa-green-light: rgba(37,211,102,0.12);
+      --wa-green-light: rgba(37, 211, 102, 0.15);
       --wa-teal: #075E54;
-      --bg-main: #0b1215;
-      --bg-sidebar: #111b21;
-      --bg-card: #1f2c33;
-      --bg-input: #2a3942;
-      --border: rgba(255,255,255,0.08);
-      --text: #e9edef;
-      --text-muted: #8696a0;
-      --text-subtle: #54656f;
-      --red: #ef4444;
+      --wa-header: #008069;
+      --bg-main: #f0f2f5;
+      --bg-sidebar: #ffffff;
+      --bg-card: #ffffff;
+      --bg-input: #f0f2f5;
+      --border: #e9edef;
+      --text: #111b21;
+      --text-muted: #54656f;
+      --text-subtle: #8696a0;
+      --red: #ea0038;
       --orange: #f59e0b;
-      --blue: #3b82f6;
-      --purple: #8b5cf6;
+      --blue: #027eb5;
+      --purple: #7044ec;
       --radius: 12px;
       --radius-sm: 8px;
       --radius-full: 9999px;
-      --shadow: 0 4px 24px rgba(0,0,0,0.4);
+      --shadow: 0 2px 10px rgba(11, 20, 26, 0.08);
     }
 
     body {
@@ -125,22 +126,23 @@
     /* ── TOPBAR ── */
     .topbar {
       height: 56px;
-      background: var(--bg-sidebar);
-      border-bottom: 1px solid var(--border);
+      background: var(--wa-header);
+      border-bottom: 1px solid rgba(0,0,0,0.08);
       display: flex;
       align-items: center;
       padding: 0 20px;
       gap: 12px;
       flex-shrink: 0;
+      color: #ffffff;
     }
 
     .topbar-title {
       display: flex; align-items: center; gap: 10px;
-      font-size: 18px; font-weight: 700; color: var(--text);
+      font-size: 18px; font-weight: 700; color: #ffffff;
     }
     .topbar-title .wa-icon {
       width: 32px; height: 32px;
-      background: var(--wa-green);
+      background: rgba(255, 255, 255, 0.2);
       border-radius: 8px;
       display: flex; align-items: center; justify-content: center;
       font-size: 16px;
@@ -150,53 +152,54 @@
 
     .search-bar {
       display: flex; align-items: center; gap: 8px;
-      background: var(--bg-input);
-      border: 1px solid var(--border);
+      background: #ffffff;
+      border: 1px solid transparent;
       border-radius: var(--radius-full);
       padding: 6px 14px;
-      width: 260px;
+      width: 320px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .search-bar input {
       background: none; border: none; outline: none;
       color: var(--text); font-size: 13px; width: 100%;
     }
-    .search-bar input::placeholder { color: var(--text-muted); }
+    .search-bar input::placeholder { color: var(--text-subtle); }
 
     .wa-status-btn {
       display: flex; align-items: center; gap: 8px;
-      background: var(--bg-input);
-      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.15);
+      border: 1px solid rgba(255,255,255,0.25);
       border-radius: var(--radius-full);
       padding: 6px 14px;
       cursor: pointer;
-      font-size: 13px; font-weight: 500; color: var(--text);
+      font-size: 13px; font-weight: 500; color: #ffffff;
       transition: all 0.15s;
       white-space: nowrap;
     }
-    .wa-status-btn:hover { border-color: var(--wa-green); color: var(--wa-green); }
+    .wa-status-btn:hover { background: rgba(255,255,255,0.25); }
     .wa-status-btn .dot {
       width: 8px; height: 8px; border-radius: 50%;
-      background: var(--red);
-      box-shadow: 0 0 6px var(--red);
+      background: #ff5c5c;
+      box-shadow: 0 0 6px rgba(255,92,92,0.8);
     }
-    .wa-status-btn .dot.online { background: var(--wa-green); box-shadow: 0 0 6px var(--wa-green); }
+    .wa-status-btn .dot.online { background: #25D366; box-shadow: 0 0 6px #25D366; }
     .wa-status-btn .dot.connecting { background: var(--orange); box-shadow: 0 0 6px var(--orange); animation: pulse 1s infinite; }
 
-    .ollama-chip {
+    .ai-engine-chip {
       display: flex; align-items: center; gap: 6px;
-      background: rgba(37,211,102,0.08);
-      border: 1px solid rgba(37,211,102,0.2);
+      background: rgba(255, 255, 255, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.25);
       border-radius: var(--radius-full);
       padding: 5px 12px;
-      font-size: 12px; font-weight: 500; color: var(--wa-green);
+      font-size: 12px; font-weight: 500; color: #ffffff;
     }
-    .ollama-chip .dot {
+    .ai-engine-chip .dot {
       width: 7px; height: 7px; border-radius: 50%;
-      background: var(--wa-green);
+      background: #25D366;
       animation: pulse 2s infinite;
     }
-    .ollama-chip.offline { color: var(--text-muted); background: rgba(255,255,255,0.04); border-color: var(--border); }
-    .ollama-chip.offline .dot { background: var(--text-muted); animation: none; }
+    .ai-engine-chip.offline { color: rgba(255,255,255,0.7); background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); }
+    .ai-engine-chip.offline .dot { background: rgba(255,255,255,0.5); animation: none; }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; }
@@ -204,8 +207,8 @@
     }
 
     .btn-simulate {
-      background: var(--wa-green);
-      color: #fff;
+      background: #ffffff;
+      color: var(--wa-teal);
       border: none;
       border-radius: var(--radius-full);
       padding: 7px 16px;
@@ -214,8 +217,9 @@
       transition: all 0.15s;
       display: flex; align-items: center; gap: 6px;
       white-space: nowrap;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
-    .btn-simulate:hover { background: var(--wa-green-dark); }
+    .btn-simulate:hover { background: #f0f2f5; }
 
     /* ── CONTENT PANELS ── */
     .content {
@@ -736,19 +740,19 @@
     <header class="topbar">
       <div class="topbar-title">
         <div class="wa-icon">💬</div>
-        WhatsApp
+        WhatsApp AI Hub
       </div>
 
       <div class="topbar-spacer"></div>
 
       <div class="search-bar">
         <span>🔍</span>
-        <input type="text" id="search-input" placeholder="Search messages, groups...">
+        <input type="text" id="search-input" placeholder="Search chats, tasks, messages...">
       </div>
 
-      <div class="ollama-chip" id="ollama-chip">
+      <div class="ai-engine-chip" id="ollama-chip">
         <div class="dot"></div>
-        Gemma 2B · Ollama
+        AI Engine · Active
       </div>
 
       <button class="wa-status-btn" id="btn-link-whatsapp">
@@ -825,11 +829,11 @@
               <div class="panel-icon green">🧠</div>
               <div>
                 <div class="panel-title">AI Summaries</div>
-                <div class="panel-sub">Gemma 2B · Ollama Local</div>
+                <div class="panel-sub">Topic-grouped chat overview</div>
               </div>
             </div>
             <div style="display:flex;align-items:center;gap:8px;">
-              <button class="btn btn-secondary" id="btn-summarize-now" style="padding:3px 9px;font-size:11px;border-radius:6px;" title="Re-summarize messages with Ollama Gemma 2B">🧠 Run AI</button>
+              <button class="btn btn-secondary" id="btn-summarize-now" style="padding:3px 9px;font-size:11px;border-radius:6px;" title="Re-summarize messages with AI">🧠 Run AI</button>
               <span class="panel-count" id="summary-count">Loading...</span>
             </div>
           </div>
@@ -1026,7 +1030,7 @@
       </div>
     </div>
     <div class="modal-foot">
-      <span id="qr-source-badge" style="font-size:11px;color:var(--text-muted);flex:1;">Polling daemon on :5001...</span>
+      <span id="qr-source-badge" style="font-size:11px;color:var(--text-muted);flex:1;">Pairing with WhatsApp Web...</span>
       <button class="btn btn-secondary" id="btn-refresh-neonize-qr">🔄 Refresh QR</button>
       <button class="btn btn-secondary" data-close="modal-whatsapp">Close</button>
     </div>
@@ -1059,7 +1063,7 @@
         <label>Group</label>
         <select class="form-control" id="sim-group">
           <option value="120363028192847@g.us|College CSE Final Year">College CSE Final Year</option>
-          <option value="120363099991234@g.us|Team Hacknova Hackathon">Team Hacknova</option>
+          <option value="120363099991234@g.us|Project Development Team">Project Team</option>
           <option value="120363011122334@g.us|Apartment Residents">Apartment Residents</option>
           <option value="120363088877665@g.us|Family Group">Family Group</option>
         </select>
@@ -1086,7 +1090,7 @@
     <div class="modal-head">
       <div>
         <h3>👥 Select WhatsApp Groups & Chats</h3>
-        <p>Choose which WhatsApp groups Ollama AI should monitor, summarize, and prioritize</p>
+        <p>Choose which WhatsApp groups AI should monitor, summarize, and prioritize</p>
       </div>
       <button class="modal-close" data-close="modal-whitelist">✕</button>
     </div>
@@ -1122,7 +1126,7 @@
       </div>
     </div>
     <div class="modal-foot">
-      <span style="font-size:11px;color:var(--text-muted);flex:1;">Active groups are summarized by Gemma 2B AI in real-time</span>
+      <span style="font-size:11px;color:var(--text-muted);flex:1;">Active groups are summarized by AI in real-time</span>
       <button class="btn btn-primary" data-close="modal-whitelist">Done</button>
     </div>
   </div>
