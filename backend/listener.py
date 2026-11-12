@@ -359,35 +359,6 @@ def setup_client_events(cl):
         return
 
     def on_qr(_: NewClient, data_qr: bytes):
-        # Throttle QR generation – only emit a new QR if at least 5 seconds have passed
-        now_ts = time.time()
-        last_ts = whatsapp_state.get("qr_ts", 0)
-        if now_ts - last_ts < 5:
-            # Skip update to avoid flooding the UI; keep the previous QR until it expires.
-            return
-        try:
-            qr_text = data_qr.decode("utf-8", errors="replace") if isinstance(data_qr, bytes) else str(data_qr)
-            qr_obj = segno.make_qr(qr_text)
-            qr_uri = qr_obj.png_data_uri(scale=8, border=4)
-            qr_svg = qr_obj.svg_data_uri(scale=8, border=4)
-            qr_b64 = base64.b64encode(qr_text.encode("utf-8")).decode("utf-8")
-            whatsapp_state["qr"] = qr_uri
-            whatsapp_state["qr_svg"] = qr_svg
-            whatsapp_state["raw_qr"] = qr_text
-            whatsapp_state["raw_b64"] = qr_b64
-            whatsapp_state["connected"] = False
-            whatsapp_state["qr_ts"] = now_ts
-            whatsapp_state["expires_in"] = 30
-            print(f"\n[on_qr FIRED] WhatsApp Pairing QR Ready (PNG len={len(qr_uri)}, SVG len={len(qr_svg)})")
-            print("[QR READY] Scan in WhatsApp: Settings > Linked Devices > Link a Device")
-            try:
-                qr_obj.terminal(compact=True)
-            except Exception:
-                pass
-        except Exception as qr_err:
-            import traceback
-            print(f"[QR GEN ERROR] {qr_err}")
-            traceback.print_exc()
         try:
             qr_text = data_qr.decode("utf-8", errors="replace") if isinstance(data_qr, bytes) else str(data_qr)
             qr_obj = segno.make_qr(qr_text)
@@ -531,6 +502,20 @@ def setup_client_events(cl):
         except Exception as err:
             print(f"❌ [ERROR] Error handling incoming WhatsApp message: {err}")
 
+def clear_database_records():
+    """Wipes tasks, calendar events, and raw messages log on user disconnect."""
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tasks")
+        cur.execute("DELETE FROM calendar_events")
+        cur.execute("DELETE FROM messages_log")
+        conn.commit()
+        conn.close()
+        print("🧹 [DATABASE] Cleared tasks, calendar_events, and messages_log successfully.")
+    except Exception as dbe:
+        print(f"⚠️ [DATABASE] Error clearing records: {dbe}")
+
 # --- Client Lifecycle & Reconnect Controller ---
 def clean_session_files():
     for fpath in [CLIENT_DB_PATH, CLIENT_DB_PATH + "-wal", CLIENT_DB_PATH + "-shm", CLIENT_DB_PATH + "-journal"]:
@@ -560,17 +545,36 @@ def run_neonize_client():
         client.connect()
     except Exception as err:
         print(f"⚠️ Neonize connection loop ended: {err}")
+    finally:
+        with client_lock:
+            client = None
+        # Reset QR expiry so client can trigger a clean new handshake
+        if not whatsapp_state.get("connected"):
+            whatsapp_state["qr"] = None
+            whatsapp_state["qr_svg"] = None
+            whatsapp_state["expires_in"] = 0
 
-def trigger_fresh_qr():
+def trigger_fresh_qr(force_clean=False):
     global client_thread, client
     if not HAS_NEONIZE:
         return False
     with client_lock:
         if whatsapp_state.get("connected") or (client and getattr(client, "is_logged_in", False)):
             return False
-        if client_thread and client_thread.is_alive():
-            return False
-        print("🔄 [RECONNECT TRIGGER] Starting pairing handshake without deleting the saved session...")
+        
+        # If client thread is alive or client exists, attempt clean disconnect
+        if client:
+            try:
+                if hasattr(client, "disconnect"):
+                    client.disconnect()
+            except Exception:
+                pass
+            client = None
+
+        if force_clean:
+            clean_session_files()
+
+        print("🔄 [RECONNECT TRIGGER] Starting pairing handshake...")
         client_thread = threading.Thread(target=run_neonize_client, daemon=True)
         client_thread.start()
         return True
@@ -1029,13 +1033,13 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
             return
 
         if self.path in ("/refresh_qr", "/refresh"):
-            started = trigger_fresh_qr()
+            started = trigger_fresh_qr(force_clean=True)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": bool(started),
-                "message": "Pairing handshake started" if started else "Pairing is unavailable, already running, or already connected"
+                "message": "Pairing handshake started" if started else "Pairing is unavailable or already connected"
             }).encode("utf-8"))
 
         elif self.path in ("/groups/toggle", "/whitelist/toggle"):
@@ -1191,18 +1195,32 @@ class DaemonHTTPHandler(BaseHTTPRequestHandler):
 
         elif self.path in ("/disconnect", "/reset"):
             try:
-                if client and hasattr(client, "disconnect"):
-                    client.disconnect()
+                global client, client_thread
+                with client_lock:
+                    if client:
+                        try:
+                            if hasattr(client, "disconnect"):
+                                client.disconnect()
+                        except Exception:
+                            pass
+                        client = None
+                
+                clean_session_files()
+                clear_database_records()
+
                 whatsapp_state["connected"] = False
                 whatsapp_state["phone"] = None
                 whatsapp_state["qr"] = None
                 whatsapp_state["qr_svg"] = None
-                clean_session_files()
+                whatsapp_state["raw_qr"] = None
+                whatsapp_state["raw_b64"] = None
+                whatsapp_state["qr_ts"] = 0
+                whatsapp_state["expires_in"] = 0
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"success": True, "status": whatsapp_state}).encode("utf-8"))
+                self.wfile.write(json.dumps({"success": True, "status": whatsapp_state, "cleared": True}).encode("utf-8"))
             except Exception as err:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")

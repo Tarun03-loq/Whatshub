@@ -54,6 +54,19 @@ def init_db():
         added_at TEXT
     )
     """)
+    
+    # Calendar events table – stores user‑visible events derived from task deadlines.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS calendar_events (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        start_iso TEXT NOT NULL,
+        end_iso TEXT,
+        group_jid TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )
+    """)
 
     # 3. Raw Messages Audit Log
     cursor.execute("""

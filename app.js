@@ -420,7 +420,9 @@ document.getElementById("btn-refresh-neonize-qr")?.addEventListener("click", () 
 });
 
 document.getElementById("btn-disconnect")?.addEventListener("click", async () => {
-  try { await fetch(DAEMON + "/disconnect", { method: "POST" }); } catch (_) {}
+  try { 
+    await fetch(DAEMON + "/disconnect", { method: "POST" }); 
+  } catch (_) {}
   state.wa = { connected: false, phone: null, qr: null, qr_svg: null, raw_b64: null };
   state.isLive = false;
   document.getElementById("qr-view").style.display = "block";
@@ -430,10 +432,13 @@ document.getElementById("btn-disconnect")?.addEventListener("click", async () =>
   if (dot) dot.className = "dot";
   if (txt) txt.textContent = "Link WhatsApp";
   
-  state.tasks = SAMPLE_TASKS;
-  state.summaries = SAMPLE_SUMMARIES;
+  // Completely clear old messages and summaries from the dashboard
+  state.tasks = [];
+  state.summaries = [];
   renderAll();
-  toast("WhatsApp disconnected. Restored demo preview.", "🔴");
+  toast("WhatsApp disconnected. All dashboard messages cleared.", "🔴");
+  // Immediately request a fresh pairing QR for next connection
+  requestFreshQR();
 });
 
 /* ── AI ENGINE STATUS CHECK ── */
@@ -1325,12 +1330,12 @@ async function refreshAll() {
 
 /* ── INIT ── */
 document.addEventListener("DOMContentLoaded", async () => {
-  // Load demo data only for the brief offline preview
-  state.tasks = SAMPLE_TASKS;
-  state.summaries = SAMPLE_SUMMARIES;
+  // Clear any old tasks on start; only display live records or empty state
+  state.tasks = [];
+  state.summaries = [];
   renderAll();
 
-  // Try to connect to the daemon – this will clear the demo data when live
+  // Try to connect to the daemon and load any live data
   await refreshAll();
 
   // Periodic daemon health check + live data refresh

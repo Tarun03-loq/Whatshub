@@ -8,13 +8,16 @@ echo   Team Hacknova ^| Gemma 2B ^| Neonize Daemon ^| Dashboard
 echo ============================================================
 echo.
 
+:: ---- Python interpreter -------------------------------------------------
 set PYTHON_EXE=C:\Users\tarun\AppData\Local\Programs\Python\Python312\python.exe
 if not exist "%PYTHON_EXE%" (
     set PYTHON_EXE=python
 )
 
+:: ---- Ensure we are in the script directory -------------------------------
 cd /d "%~dp0"
 
+:: ---- Install / verify dependencies ---------------------------------------
 echo Installing/checking project dependencies...
 "%PYTHON_EXE%" -m pip install -r backend\requirements.txt
 if errorlevel 1 (
@@ -23,8 +26,9 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: ---- Ollama -------------------------------------------------------------
 echo [1/3] Checking Ollama AI engine...
-curl -s http://localhost:11434 >nul 2>&1
+powershell -Command "try {Invoke-WebRequest -Uri http://localhost:11434 -UseBasicParsing -ErrorAction Stop} catch {}"
 if %ERRORLEVEL% EQU 0 (
     echo     [OK] Ollama is active.
 ) else (
@@ -32,16 +36,18 @@ if %ERRORLEVEL% EQU 0 (
     start "" /b ollama serve >nul 2>&1
 )
 
+:: ---- Neonize daemon -----------------------------------------------------
 echo [2/3] Starting WhatsApp Neonize Daemon on port 5001...
-start "WhatsHub - WhatsApp Daemon (:5001)" cmd /k ""%PYTHON_EXE%" backend\listener.py"
+start "" %PYTHON_EXE% backend\listener.py
 
+:: ---- Web UI -------------------------------------------------------------
 timeout /t 2 /nobreak >nul
-
 echo [3/3] Starting WhatsHub Web Server on port 8080...
-start "WhatsHub - Web Server (:8080)" cmd /k ""%PYTHON_EXE%" -m http.server 8080 --bind 127.0.0.1"
+rem Use /d to set the working directory so static files are served correctly
+start "" %PYTHON_EXE% -m http.server 8080 --bind 127.0.0.1
 
+:: ---- Give the user a friendly link --------------------------------------
 timeout /t 2 /nobreak >nul
-
 echo.
 echo ============================================================
 echo  [READY] Launching WhatsHub in your default browser...
